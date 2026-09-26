@@ -94,6 +94,14 @@ enabled = true
 # require = ["libnvdimm", "nd_btt", "of_pmem", "nd_pmem"]  # 内核 =m 时声明（含加载顺序）
 # stage = "runtime"                              # rootfs 阶段加载（缺省）
 
+# [components.bpf]
+# bpf 观测组件：bpftrace（官方 Release AppImage，自含 Nix 闭包）随 tools 盘
+# 供给，/tools/bin/bpftrace 直跑（PATH 已注入）。解包在 build 期容器内完成
+# （需 docker，与 kernel 供给同依赖），VM 内零解包。内核侧要求 BPF/BTF
+# （openEuler defconfig 缺省即开）。启用后 tools.img 增至 ~600M；首次构建
+# 下载 ~190M 并解包，之后缓存复用。段缺省 = 关闭。
+# enabled = true
+
 # ------------------------------------------------------------- 测例
 
 # [tests]

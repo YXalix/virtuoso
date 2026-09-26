@@ -73,6 +73,73 @@ pub(crate) fn human_size_ls(bytes: u64) -> String {
     }
 }
 
+// ---------------------------------------------------------------- 构建增量
+
+/// 暂存树内容指纹：相对路径 + 条目类型 + 长度/符号链接目标的 SipHash 串接
+/// （std 自带 DefaultHasher，无新依赖；排序遍历保证确定性）。镜像级增量用：
+/// 指纹未变 = 输入字节不变，可安全跳过重建。`extra` 并入指纹（构建方式/参数）。
+pub(crate) fn tree_fingerprint(dir: &Path, extra: &str) -> anyhow::Result<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn walk(h: &mut DefaultHasher, dir: &Path) -> anyhow::Result<()> {
+        let mut entries: Vec<std::fs::DirEntry> =
+            std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let ft = e.file_type()?;
+            e.file_name().hash(h);
+            if ft.is_symlink() {
+                1u8.hash(h);
+                std::fs::read_link(e.path())?.hash(h);
+            } else if ft.is_dir() {
+                2u8.hash(h);
+                walk(h, &e.path())?;
+            } else {
+                3u8.hash(h);
+                e.metadata()?.len().hash(h);
+                let mut f = std::fs::File::open(e.path())?;
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = std::io::Read::read(&mut f, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    h.write(&buf[..n]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut h = DefaultHasher::new();
+    extra.hash(&mut h);
+    walk(&mut h, dir)?;
+    Ok(format!("{:016x}", h.finish()))
+}
+
+/// 镜像级增量：暂存树指纹（含构建方式 `extra`）与 `<out>.stamp` 一致且产物
+/// 在 → 跳过重建（返回 false）；否则执行 `build` 并落新 stamp。
+/// stamp 放产物旁（git 忽略的 artifacts 目录），删产物即失效。
+pub(crate) fn if_changed(
+    dir: &Path,
+    extra: &str,
+    out: &Path,
+    label: &str,
+    progress: &mut Progress,
+    build: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    let fp = tree_fingerprint(dir, extra)?;
+    let stamp = std::path::PathBuf::from(format!("{}.stamp", out.display()));
+    if out.is_file() && std::fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == fp) {
+        progress.line(&format!("{label}: unchanged, skipped"));
+        return Ok(false);
+    }
+    build()?;
+    std::fs::write(&stamp, fp)?;
+    Ok(true)
+}
+
 // ---------------------------------------------------------------- 进度输出
 
 /// 进度输出通道：stdout 恒打，可选同步写日志文件。

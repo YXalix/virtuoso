@@ -13,6 +13,7 @@ launcher 负责生成对应的 QEMU 参数。
 | [vfio](#vfio--pci-直通) | PCI 直通，逐条生成 `-device vfio-pci,host=<bdf>` | 关闭 | `devices` |
 | [numa](#numa--多节点拓扑) | 多节点拓扑（每节点一个 socket） | 关闭 | `nodes`、`memory_per_node` |
 | [pmem](#pmem--持久内存) | 持久内存（DT 途径 → `/dev/pmem0` + DAX） | 关闭 | `size`、`require` |
+| [bpf](#bpf--bpftrace-观测) | bpftrace 随 tools 盘供给（eBPF 内核观测） | 关闭 | — |
 
 `[busybox]` 是全局段（非组件），`[tests]` 是测例套件段（收用例需要的
 模块依赖），见[配置参考](../usage/configuration.md)。
@@ -45,7 +46,7 @@ require = ["virtio_console"]
   排在最后），builder 写入 rootfs `/lib/modules/modules.conf`，测试 init 在
   pivot 后加载。
 
-并集规则：schema 固定顺序 tools_disk→agent→vfio→numa→pmem→`[tests]`，
+并集规则：schema 固定顺序 tools_disk→agent→vfio→numa→pmem→bpf→`[tests]`，
 按首 token 去重保首个。
 
 规则与陷阱：
@@ -196,3 +197,30 @@ guest 内：`/dev/pmem0` 出现后即可 mkfs / dax 挂载，重跑 VM 数据仍
 限制：仅 arm64 / riscv64（DT 途径），x86_64 无此途径；`size` 必须小于
 总内存，否则解析期拒绝；macOS 上为 experimental（doctor WARN），链路
 （memory-backend-file + dumpdtb/fdtput）未经 HVF 实测前不要依赖。
+
+## bpf — bpftrace 观测
+
+eBPF 内核观测：bpftrace 随 tools 盘供给，VM 内 `/tools/bin/bpftrace` 直跑
+（PATH 已由 tools 盘注入），one-liner 输出经 agent 通道或串口回宿主。
+
+```toml
+[components.bpf]                   # 段缺省 = 关闭
+enabled = true
+```
+
+供给形态：官方 Release 的 AppImage（自含 Nix 闭包，内嵌 LLVM/clang），
+**build 期**在容器内解包成纯文件树放入 tools 盘 `/tools/nix`（需要 docker，
+与 kernel 供给同依赖），VM 内 `ln -s /tools/nix /nix` 后直跑 store 二进制
+—— 零运行时解包、零额外内存。首次启用下载 ~190M 并解包，之后缓存复用
+（`target/build/bpftrace/`），tools.img 增至 ~600M。
+
+内核侧要求 BPF/BTF（`CONFIG_BPF_SYSCALL` / `DEBUG_INFO_BTF` 等），
+openEuler defconfig 缺省即开，无需重建内核。观测入口示例：
+
+```bash
+virtuoso probe --cmd 'bpftrace -e "kprobe:handle_mm_fault { @faults[comm]++ } \
+  interval:s:2 { print(@faults); } interval:s:8 { exit(); }"'
+```
+
+限制：仅 arm64 / x86_64（官方无 riscv64 资产）；bpftrace 0.27 的 `count()`
+走 stdlib 宏有展开缺陷，用 `@[comm]++` 等价写法替代。

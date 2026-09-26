@@ -55,6 +55,7 @@ pub(crate) fn build_pair_for(
             runtime: plan.runtime,
         },
         &cfg.project_root.join("rootfs.d"),
+        cfg.bpf_enabled(),
         &mut progress,
     )
 }
@@ -62,7 +63,14 @@ pub(crate) fn build_pair_for(
 pub fn run_clean() -> anyhow::Result<i32> {
     let cfg = Config::load()?;
     let mut removed = 0usize;
-    for f in ["initrd.img", "rootfs.img", "tools.img"] {
+    for f in [
+        "initrd.img",
+        "initrd.img.stamp",
+        "rootfs.img",
+        "rootfs.img.stamp",
+        "tools.img",
+        "tools.img.stamp",
+    ] {
         let p = cfg.artifacts_dir.join(f);
         if p.is_file() {
             std::fs::remove_file(&p)?;
@@ -70,8 +78,8 @@ pub fn run_clean() -> anyhow::Result<i32> {
             removed += 1;
         }
     }
-    // 暂存目录与组装产物（busybox 缓存保留，重下/重编代价高）
-    for d in ["initramfs", "rootfs"] {
+    // 暂存目录与组装产物（busybox/bpftrace 缓存保留，重下/重解包代价高）
+    for d in ["initramfs", "rootfs", "tools"] {
         let p = cfg.build_dir.join(d);
         if p.is_dir() {
             std::fs::remove_dir_all(&p)?;
@@ -86,7 +94,7 @@ pub fn run_clean() -> anyhow::Result<i32> {
         println!("removed: {}/", testcases_target.display());
         removed += 1;
     }
-    println!("clean done: {removed} item(s) removed (busybox cache kept)",);
+    println!("clean done: {removed} item(s) removed (busybox/bpftrace cache kept)",);
     Ok(0)
 }
 

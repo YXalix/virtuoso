@@ -241,7 +241,7 @@ impl Config {
     }
 
     /// 组件计划：启用组件的 require 并集（按 schema 固定顺序
-    /// tools_disk → agent → vfio → numa → pmem，去重保首个），按 stage 分区。
+    /// tools_disk → agent → vfio → numa → pmem → bpf，去重保首个），按 stage 分区。
     /// `[tests]` 段的 require 最后并入（恒 runtime；同名模块组件条目优先，
     /// 测例只补差集）。
     pub fn component_plan(&self) -> ComponentPlan {
@@ -261,6 +261,9 @@ impl Config {
         if let Some(c) = self.comp(|c| c.pmem.as_ref()) {
             push_enabled(&mut plan, c);
         }
+        if let Some(c) = self.comp(|c| c.bpf.as_ref()) {
+            push_enabled(&mut plan, c);
+        }
         if let Some(t) = self.toml.as_ref().and_then(|t| t.tests.as_ref()) {
             plan.push(None, &t.require);
         }
@@ -278,6 +281,14 @@ impl Config {
     /// agent 组件是否启用（段缺省 = false：argv 保持冻结基线）。
     pub fn agent_enabled(&self) -> bool {
         self.comp(|c| c.agent.as_ref())
+            .and_then(|c| c.enabled)
+            .unwrap_or(false)
+    }
+
+    /// bpf 观测组件（bpftrace 随 tools 盘供给）是否启用。
+    /// 段缺省 = false：纯构建侧开关，QEMU argv 与冻结基线无关。
+    pub fn bpf_enabled(&self) -> bool {
+        self.comp(|c| c.bpf.as_ref())
             .and_then(|c| c.enabled)
             .unwrap_or(false)
     }
@@ -436,6 +447,7 @@ pub(crate) struct ComponentsSection {
     pub(crate) vfio: Option<VfioComponent>,
     pub(crate) numa: Option<NumaComponent>,
     pub(crate) pmem: Option<PmemComponent>,
+    pub(crate) bpf: Option<BpfComponent>,
 }
 
 // 组件公共字段（enabled / require / stage）逐结构体显式声明 —— 不用
@@ -559,6 +571,30 @@ pub(crate) struct PmemComponent {
 }
 
 impl Component for PmemComponent {
+    fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+    fn stage(&self) -> Option<Stage> {
+        self.stage
+    }
+    fn require(&self) -> &Option<Vec<String>> {
+        &self.require
+    }
+}
+
+/// bpf 观测组件：bpftrace（官方 Release AppImage）随 tools 盘供给。
+/// 段缺省 = 关闭；纯构建侧开关 —— QEMU argv 与冻结基线无关，运行时
+/// 以 `/tools/bin/bpftrace` 直跑（内核侧要求 BPF/BTF，openEuler defconfig
+/// 缺省即开）。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BpfComponent {
+    pub(crate) enabled: Option<bool>,
+    pub(crate) require: Option<Vec<String>>,
+    pub(crate) stage: Option<Stage>,
+}
+
+impl Component for BpfComponent {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
@@ -776,6 +812,36 @@ require = ["libnvdimm", "nfit", "nd_pmem"]
     #[test]
     fn pmem_unknown_key_rejected() {
         assert!(parse("[components.pmem]\nenabled = true\nsizes = \"1G\"\n").is_err());
+    }
+
+    #[test]
+    fn bpf_component_defaults_off_and_parses_enabled() {
+        // 段缺省 = 无段；空段/未写 enabled = 关闭
+        let cfg = parse("[components.bpf]\n").unwrap();
+        let bpf = cfg.components.as_ref().unwrap().bpf.as_ref().unwrap();
+        assert!(bpf.enabled.is_none());
+        let mut plan = ComponentPlan::default();
+        push_enabled(&mut plan, bpf);
+        assert_eq!(plan.all().count(), 0);
+
+        let cfg = parse(
+            r#"
+[components.bpf]
+enabled = true
+require = ["bpf"]
+"#,
+        )
+        .unwrap();
+        let bpf = cfg.components.as_ref().unwrap().bpf.as_ref().unwrap();
+        assert_eq!(bpf.enabled, Some(true));
+        let mut plan = ComponentPlan::default();
+        push_enabled(&mut plan, bpf);
+        assert_eq!(plan.all().cloned().collect::<Vec<_>>(), ["bpf"]);
+    }
+
+    #[test]
+    fn bpf_unknown_key_rejected() {
+        assert!(parse("[components.bpf]\nenabled = true\nversion = \"0.27.0\"\n").is_err());
     }
 
     #[test]

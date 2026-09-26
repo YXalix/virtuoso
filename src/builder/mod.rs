@@ -2,6 +2,7 @@
 //! 接管：BusyBox 供给、C 用例编译、initramfs/rootfs 组装（行为等价移植，
 //! 消息文本与退出码语义对齐 shell 基线）。
 
+pub(crate) mod bpftrace;
 pub(crate) mod busybox;
 pub(crate) mod cargo_install;
 pub(crate) mod cpio;
@@ -63,6 +64,7 @@ pub(crate) fn build_boot_pair(
     hooks: &[InitHook],
     modules: &modconf::Modules,
     rootfs_d_dir: &Path,
+    bpf_enabled: bool,
     progress: &mut Progress,
 ) -> anyhow::Result<()> {
     // 与脚本一致的先决检查
@@ -110,7 +112,14 @@ pub(crate) fn build_boot_pair(
         infra_dir,
         progress,
     )?;
-    cpio::pack_dir_gzip(&initramfs_dir, &artifacts_dir.join("initrd.img"))?;
+    crate::util::if_changed(
+        &initramfs_dir,
+        "cpio pack_dir_gzip",
+        &artifacts_dir.join("initrd.img"),
+        "initrd.img",
+        progress,
+        || cpio::pack_dir_gzip(&initramfs_dir, &artifacts_dir.join("initrd.img")),
+    )?;
 
     // ---------- rootfs.img: ext4 rootfs with tests ----------
     progress.line("Building rootfs.img (ext4 rootfs)...");
@@ -154,14 +163,40 @@ pub(crate) fn build_boot_pair(
         &cross_setup,
         progress,
     )?;
+    // components.bpf（默认关）：bpftrace 官方 AppImage → 下载缓存 + 容器
+    // 解包（需要 docker，与 kernel 供给同依赖）→ 解包树进 tools 盘 /tools/nix，
+    // wrapper 落 /tools/bin/bpftrace（PATH 已由 tools 盘 hook 注入）。
+    let bpf_tar = if bpf_enabled {
+        Some(bpftrace::ensure(build_dir, arch, progress)?)
+    } else {
+        None
+    };
+    if let Some(tar) = &bpf_tar {
+        bpftrace::install(&tools_dir, tar, progress)?;
+    }
+    let tools_installed = tools_installed || bpf_tar.is_some();
     let mut hooks = hooks.to_vec();
     if tools_installed {
-        image::make_ext4(&tools_dir, &artifacts_dir.join("tools.img"), "tools")?;
+        crate::util::if_changed(
+            &tools_dir,
+            "mke2fs ext4 -b 4096 -O ^has_journal",
+            &artifacts_dir.join("tools.img"),
+            "tools.img",
+            progress,
+            || image::make_ext4(&tools_dir, &artifacts_dir.join("tools.img"), "tools"),
+        )?;
         hooks.push(InitHook::shell("tools-disk", TOOLS_DISK_HOOK));
     }
     write_hooks(&rootfs_dir, &hooks)?;
     apply_rootfs_d(&rootfs_dir, rootfs_d_dir, progress)?;
-    image::make_ext4(&rootfs_dir, &artifacts_dir.join("rootfs.img"), "rootfs")?;
+    crate::util::if_changed(
+        &rootfs_dir,
+        "mke2fs ext4 -b 4096 -O ^has_journal",
+        &artifacts_dir.join("rootfs.img"),
+        "rootfs.img",
+        progress,
+        || image::make_ext4(&rootfs_dir, &artifacts_dir.join("rootfs.img"), "rootfs"),
+    )?;
 
     progress.line("");
     progress.line("Done:");
