@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["agent"]
+members = ["agent", "bpf-run"]
 
 # tools workspace：VM 内常驻工具（std Rust + musl 静态）。与 testcases 分类
 # 正交：工具不进 /tests、不被 init 自动发现、不参与标记协议判定。

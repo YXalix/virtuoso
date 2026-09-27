@@ -82,6 +82,10 @@ mount_filesystems() {
     mount -t devtmpfs none /dev 2>/dev/null
     mount -t tmpfs none /tmp 2>/dev/null
     mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+    # tracefs 挂点由内核 tracefs 初始化自建（sysfs_create_mount_point），内建
+    # (=y) 时开机即存在；eBPF tracepoint 系（bpftrace tracepoint:、libbpf/aya
+    # tp attach）依赖它可见。kprobe 走 perf PMU 不经 tracefs，已挂时 EBUSY 吞掉。
+    mount -t tracefs none /sys/kernel/tracing 2>/dev/null || true
 
     mkdir -p /dev/pts /dev/shm 2>/dev/null
     mount -t devpts devpts /dev/pts 2>/dev/null

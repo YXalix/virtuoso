@@ -203,6 +203,11 @@ guest 内：`/dev/pmem0` 出现后即可 mkfs / dax 挂载，重跑 VM 数据仍
 eBPF 内核观测：bpftrace 随 tools 盘供给，VM 内 `/tools/bin/bpftrace` 直跑
 （PATH 已由 tools 盘注入），one-liner 输出经 agent 通道或串口回宿主。
 
+程序态观测（加载现成 `.bpf.o` 的 `bpf-run`）**常驻 tools 盘 `/bin`，与
+本组件开关无关、恒默认可用**——bpftrace 负责脚本态临时探索，bpf-run
+负责编译好的 BPF 程序的结构化事件流，用法见
+[AI 集成 · eBPF 观测](../usage/ai-integration.md#ebpf-观测程序态)。
+
 ```toml
 [components.bpf]                   # 段缺省 = 关闭
 enabled = true

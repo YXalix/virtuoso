@@ -46,6 +46,43 @@ virtuoso probe --cmd 'uname -a' --cmd 'cat /proc/iomem' --json
 
 通道机制见[组件机制 agent 一节](../concepts/components.md#agent--ai-probe-通道)。
 
+## eBPF 观测（程序态）
+
+观测的两条形态互补，均随镜像供给、默认可用：
+
+- **脚本态**：`bpftrace`（`[components.bpf]` 组件，默认关）做临时探索，
+  one-liner 即写即跑；
+- **程序态**：`bpf-run` 常驻 tools 盘 `/bin`（默认随盘，与组件开关无关），
+  消费宿主编译好的现成 `.bpf.o`，按段挂接（kprobe/kretprobe/tracepoint/
+  raw_tracepoint），ringbuf 事件自动解码成 JSONL——stdout 恒为纯事件流，
+  经 probe 通道落 `agent-events.jsonl`，即 AI 的结构化观测闭环。
+
+`.bpf.o` 的供给走 rootfs.d drop-in（build 期并入 rootfs，"每次编译好的
+现成程序"）：
+
+```bash
+clang -target bpf -g -O2 -c my.bpf.c -o rootfs.d/bpf/my.bpf.o
+virtuoso build
+virtuoso probe --cmd 'bpf-run /bpf/my.bpf.o --wait 5'
+```
+
+`bpf-run` 要点：
+
+- 事件解码按记录长度匹配对象 BTF 里的具名 struct（`--struct NAME` 可显式
+  指定）；匹配不到的记录 hex 兜底。**record 结构体须挂进 BTF**：aya 拒绝
+  ringbuf 的 values 注解，且 `-O2` 会裁掉仅被 reserve 使用的类型——用一行
+  extern 函数锚把结构体带进 BTF：
+  `struct event *bpf_anchor_event(struct event *e) { return e; }`
+- 挂接失败不中止整体（逐程序 warn，全失败才退出 1；load 错误链带
+  verifier 日志，即内核 BPF 开发的反馈面）；`--program NAME` 过滤，
+  `--wait SECS` 限定采集窗（缺省 5s），退出码 0=正常（含零事件）。
+- 对象 BTF 可用 dump-btf 示例检视（struct 是否进表、map 是否识别为
+  ringbuf）：`cargo run --manifest-path infra/tools/bpf-run/Cargo.toml
+  --example dump-btf -- <obj.bpf.o>`。
+
+临时性、一次性的内核态观测不需要写 BPF 程序：ftrace（tracefs 已挂载，
+`/sys/kernel/tracing/`）与 bpftrace 已覆盖。
+
 ## 安全边界（架构约束）
 
 - AI **只读分析**测试产物与内核日志；对内核源码的任何修改必须人工确认后由

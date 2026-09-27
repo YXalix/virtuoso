@@ -1,0 +1,16 @@
+[package]
+name = "bpf-run"
+version = "0.1.0"
+edition = "2021"
+description = "VM 常驻 eBPF runner：加载 .bpf.o、按段挂接（kprobe/kretprobe/tracepoint/raw_tracepoint）、ringbuf 事件 BTF 解码 JSONL——程序态观测入口"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+# ELF/符号表解析（aya 同款纯 Rust 依赖，与 aya 版本要求去重到同一份）
+object = "0.39"
+
+# aya 是 Linux-only（bpf syscall + Linux libc 符号）：只对 linux 目标注入，
+# 宿主 check（macOS）编裸桩；VM 构建恒 musl linux 目标。
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.14.0"
