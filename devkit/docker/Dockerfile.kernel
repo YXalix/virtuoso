@@ -16,6 +16,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         build-essential bc bison flex libelf-dev libssl-dev dwarves \
+        # 静态 bpftool（kernel build 顺带供给）：libelf.a 引 zstd，静态链接须显式带上
+        zlib1g-dev libzstd-dev \
         python3 cpio xz-utils file patch rsync \
         # 三架构全覆盖：native（build-essential）+ 双交叉
         gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu gcc-riscv64-linux-gnu \

@@ -164,14 +164,20 @@ fn run_build(jobs: Option<usize>, cli_arch: Option<&str>) -> anyhow::Result<i32>
     });
     let image_target = crate::forge::make_image_target(arch);
     println!(
-        "Kernel: make -j{jobs} {image_target} modules（volume {volume}，arch {}）",
+        "Kernel: make -j{jobs} {image_target} modules + static bpftool（volume {volume}，arch {}）",
         arch.name()
+    );
+    // kernel make 失败即整体失败（|| exit $?）；bpftool 失败只 WARN（见
+    // forge::bpftool_step）——控制面工具不挡内核构建本身。
+    let script = format!(
+        "make -j{jobs} {image_target} modules || exit $?\n{}",
+        crate::forge::bpftool_step(jobs, arch)
     );
     crate::forge::run_streaming(
         &volume,
         &toolchain_image(),
         &crate::forge::make_env(arch),
-        &format!("make -j{jobs} {image_target} modules"),
+        &script,
     )?;
     crate::forge::cdb_generate(&volume, &toolchain_image())?;
     println!(

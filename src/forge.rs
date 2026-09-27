@@ -422,6 +422,39 @@ pub(crate) fn make_image_target(arch: Arch) -> &'static str {
     }
 }
 
+/// arch → 容器内 `uname -m` 的同构形态（供给链脚本的守卫用）。
+fn uname_arch(arch: Arch) -> &'static str {
+    match arch {
+        Arch::Arm64 => "aarch64",
+        Arch::X86_64 => "x86_64",
+        Arch::Riscv64 => "riscv64",
+    }
+}
+
+/// kernel build 附加步：内核树内静态 bpftool（in-tree libbpf 同树链入，
+/// 版本与被测内核严格匹配——`btf dump`/`prog`/`map` 检视的控制面）。
+/// libelf.a 的 elf_compress 引 zstd，静态链接须显式 `-lzstd`（动态链接时
+/// 由 libelf.so 的 DT_NEEDED 隐式解决）。仅容器原生 arch 与目标同构时可行
+/// （静态 libelf/z/zstd 只按容器原生 arch 装包，交叉缺静态库）；失败不
+/// 致命——kernel make 的退出码不受影响，只 WARN 提示。
+pub(crate) fn bpftool_step(jobs: usize, arch: Arch) -> String {
+    let uname = uname_arch(arch);
+    format!(
+        "\
+if [ \"$(uname -m)\" = \"{uname}\" ]; then
+  if env -u ARCH -u CROSS_COMPILE make -C tools/bpf/bpftool -j{jobs} \\
+    LDFLAGS=-static 'LIBS=$(LIBBPF) -lelf -lz -lzstd'; then
+    echo 'bpftool: static build ready (tools/bpf/bpftool/bpftool)'
+  else
+    echo 'WARN: bpftool build failed — refresh the toolchain image (libzstd-dev, see devkit/docker/Dockerfile.kernel) or check the tree state'
+  fi
+else
+  echo 'WARN: bpftool skipped — static supply needs a same-arch container (target {uname})'
+fi
+"
+    )
+}
+
 /// compile_commands.json 生成（/ksrc 原始形态，容器内 clangd/devcontainer
 /// 消费）。脚本由内核树自带（从 .cmd 文件聚合，无需 bear）：mainline/
 /// openEuler 均为 `scripts/clang-tools/gen_compile_commands.py`；个别树可能
@@ -722,6 +755,19 @@ mod tests {
         assert_eq!(make_image_target(Arch::Arm64), "Image");
         assert_eq!(make_image_target(Arch::X86_64), "bzImage");
         assert_eq!(make_image_target(Arch::Riscv64), "Image");
+    }
+
+    #[test]
+    fn bpftool_step_pins_recipe_and_arch_guard() {
+        let s = bpftool_step(16, Arch::Arm64);
+        // 同构守卫 + 静态配方（-lzstd 追加在 LIBS 尾部，链接顺序敏感）
+        assert!(s.contains("[ \"$(uname -m)\" = \"aarch64\" ]"));
+        assert!(s.contains("env -u ARCH -u CROSS_COMPILE make -C tools/bpf/bpftool -j16"));
+        assert!(s.contains("LDFLAGS=-static"));
+        assert!(s.contains("'LIBS=$(LIBBPF) -lelf -lz -lzstd'"));
+        for a in [Arch::X86_64, Arch::Riscv64] {
+            assert!(bpftool_step(4, a).contains(uname_arch(a)));
+        }
     }
 
     #[test]

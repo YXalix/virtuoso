@@ -100,6 +100,9 @@ enabled = true
 # （需 docker，与 kernel 供给同依赖），VM 内零解包。内核侧要求 BPF/BTF
 # （openEuler defconfig 缺省即开）。启用后 tools.img 增至 ~600M；首次构建
 # 下载 ~190M 并解包，之后缓存复用。段缺省 = 关闭。
+# 注意 bpftool / bpf-run 与本开关无关、常驻 /bin：bpftool 由 `virtuoso
+# kernel build` 从内核树静态构建（in-tree libbpf 链入），本开关只门控
+# bpftrace。
 # enabled = true
 
 # ------------------------------------------------------------- 测例

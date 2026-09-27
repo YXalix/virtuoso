@@ -3,6 +3,7 @@
 //! 消息文本与退出码语义对齐 shell 基线）。
 
 pub(crate) mod bpftrace;
+pub(crate) mod bpftool;
 pub(crate) mod busybox;
 pub(crate) mod cargo_install;
 pub(crate) mod cpio;
@@ -163,6 +164,10 @@ pub(crate) fn build_boot_pair(
         &cross_setup,
         progress,
     )?;
+    // bpftool（kernel build 顺带产物）：内核树静态 bpftool 搬进 /bin，与
+    // bpf-run 同为常驻 tools 盘一等工具（与组件开关无关）；树内无产物则
+    // WARN 跳过，见 bpftool::install。
+    let bpftool_installed = bpftool::install(kernel_path, &tools_dir.join("bin"), progress)?;
     // components.bpf（默认关）：bpftrace 官方 AppImage → 下载缓存 + 容器
     // 解包（需要 docker，与 kernel 供给同依赖）→ 解包树进 tools 盘 /tools/nix，
     // wrapper 落 /tools/bin/bpftrace（PATH 已由 tools 盘 hook 注入）。
@@ -174,7 +179,7 @@ pub(crate) fn build_boot_pair(
     if let Some(tar) = &bpf_tar {
         bpftrace::install(&tools_dir, tar, progress)?;
     }
-    let tools_installed = tools_installed || bpf_tar.is_some();
+    let tools_installed = tools_installed || bpftool_installed || bpf_tar.is_some();
     let mut hooks = hooks.to_vec();
     if tools_installed {
         crate::util::if_changed(

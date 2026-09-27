@@ -47,7 +47,7 @@ volume 本体就在宿主文件系统）：
 ```bash
 virtuoso kernel clone https://gitcode.com/openeuler/kernel.git --ref OLK-6.6
 virtuoso kernel defconfig openeuler_defconfig
-virtuoso kernel build          # Image + modules + compile_commands.json
+virtuoso kernel build          # Image + modules + 静态 bpftool + compile_commands.json
 virtuoso kernel path           # → volume 的宿主可见路径（QEMU 消费）
 ```
 

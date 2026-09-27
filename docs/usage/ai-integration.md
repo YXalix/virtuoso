@@ -48,14 +48,18 @@ virtuoso probe --cmd 'uname -a' --cmd 'cat /proc/iomem' --json
 
 ## eBPF 观测（程序态）
 
-观测的两条形态互补，均随镜像供给、默认可用：
+观测的三条形态互补，前两条随镜像供给、默认可用：
 
 - **脚本态**：`bpftrace`（`[components.bpf]` 组件，默认关）做临时探索，
   one-liner 即写即跑；
 - **程序态**：`bpf-run` 常驻 tools 盘 `/bin`（默认随盘，与组件开关无关），
   消费宿主编译好的现成 `.bpf.o`，按段挂接（kprobe/kretprobe/tracepoint/
   raw_tracepoint），ringbuf 事件自动解码成 JSONL——stdout 恒为纯事件流，
-  经 probe 通道落 `agent-events.jsonl`，即 AI 的结构化观测闭环。
+  经 probe 通道落 `agent-events.jsonl`，即 AI 的结构化观测闭环；
+- **控制面**：`bpftool` 同样常驻 `/bin`（默认随盘）——`virtuoso kernel
+  build` 从内核树顺带静态构建（in-tree libbpf 版本与被测内核严格匹配），
+  `btf dump` 检视 vmlinux/模块 BTF、`prog show` / `map dump` 观察加载态，
+  是 bpf-run 工作流的检视伴侣（内核树无产物时构建 WARN 跳过）。
 
 `.bpf.o` 的供给走 rootfs.d drop-in（build 期并入 rootfs，"每次编译好的
 现成程序"）：

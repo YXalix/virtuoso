@@ -208,6 +208,12 @@ eBPF 内核观测：bpftrace 随 tools 盘供给，VM 内 `/tools/bin/bpftrace` 
 负责编译好的 BPF 程序的结构化事件流，用法见
 [AI 集成 · eBPF 观测](../usage/ai-integration.md#ebpf-观测程序态)。
 
+`bpftool` 同样**常驻 `/bin`、与组件开关无关**：`virtuoso kernel build`
+从内核树顺带静态构建（in-tree libbpf 同树链入，版本与被测内核严格匹配），
+builder 搬运随 tools 盘——`btf dump` / `prog` / `map` 检视的内核开发控制
+面。内核树内无产物（未跑 kernel build，或目标 arch 与工具链容器不同构）
+时 WARN 跳过，不挡主流程。
+
 ```toml
 [components.bpf]                   # 段缺省 = 关闭
 enabled = true
