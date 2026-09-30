@@ -18,6 +18,9 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         build-essential bc bison flex libelf-dev libssl-dev dwarves \
         # 静态 bpftool（kernel build 顺带供给）：libelf.a 引 zstd，静态链接须显式带上
         zlib1g-dev libzstd-dev \
+        # Rust for Linux：bindgen-cli 经 llvm-sys 动态链 libclang（构建期与运行期都要）
+        libclang-dev \
+        curl \
         python3 cpio xz-utils file patch rsync \
         # 三架构全覆盖：native（build-essential）+ 双交叉
         gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu gcc-riscv64-linux-gnu \
@@ -25,6 +28,19 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         clangd \
         git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+# Rust for Linux 工具链 —— 钉在主线树 scripts/min-tool-version.sh 下限
+# （rustc 1.85.0 / bindgen 0.71.1；oe66 树下限 1.73.0/0.65.1 更低，被覆盖）。
+# 主线树升级后同步抬钉子。rustup 装系统级 /usr/local；bindgen 用 cargo
+# --locked 源码构建，arm64/amd64 双基座都原生编译。
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --profile minimal --default-toolchain 1.85.0 \
+        --component rust-src --component clippy --component rustfmt && \
+    cargo install --locked --version 0.71.1 bindgen-cli && \
+    rm -rf "${CARGO_HOME}/registry"
 
 WORKDIR /ksrc
 

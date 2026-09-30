@@ -21,7 +21,7 @@ OrbStack（doctor 会守卫引擎端点）。
 
 | 文件 | 作用 |
 |---|---|
-| `Dockerfile.kernel` | 钉死工具链：ubuntu:24.04 + 内核构建依赖 + 三架构 gcc + clangd |
+| `Dockerfile.kernel` | 钉死工具链：ubuntu:24.04 + 内核构建依赖 + 三架构 gcc + clangd + Rust for Linux 工具链（rustc/bindgen 钉主线树 `scripts/min-tool-version.sh` 下限，rust-src/clippy/rustfmt 全配） |
 | `devcontainer.json` | 静态模板（缺省卷形态）；`kernel use/clone` 另按 current 渲染 git 忽略的 `.devcontainer/devcontainer.json`（repo 根）—— VS Code「Reopen in Container」→ volume 为 workspace 的容器内编辑路径（源码编辑的标准入口） |
 | `.clangd` | clangd 配置模板（唯一事实来源）：`kernel clone` 时按目标架构渲染写进源码根 |
 

@@ -616,6 +616,7 @@ const TEMPLATE: &str = r#"// 由 `virtuoso kernel use/clone` 自动渲染 ——
     "vscode": {
       "extensions": [
         "llvm-vs-code-extensions.vscode-clangd",
+        "rust-lang.rust-analyzer",
         "ms-azuretools.vscode-docker"
       ],
       "settings": {
@@ -626,9 +627,11 @@ const TEMPLATE: &str = r#"// 由 `virtuoso kernel use/clone` 自动渲染 ——
           "--header-insertion=never",
           "--query-driver=/usr/bin/*"
         ],
-        // 内核 C 风格：8 空格缩进
+        // Rust 侧索引：容器里 make rust-analyzer 产出 rust-project.json，扩展自动拾取
+        // 内核 C 风格：8 空格缩进；Rust 侧走标准 rustfmt 四空格
         "editor.tabSize": 8,
         "[c]": { "editor.insertSpaces": false },
+        "[rust]": { "editor.tabSize": 4 },
         "files.exclude": {
           "**/*.o": true,
           "**/*.cmd": true,
