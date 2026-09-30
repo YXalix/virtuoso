@@ -29,15 +29,18 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Rust for Linux 工具链 —— 钉在主线树 scripts/min-tool-version.sh 下限
-# （rustc 1.85.0 / bindgen 0.71.1；oe66 树下限 1.73.0/0.65.1 更低，被覆盖）。
-# 主线树升级后同步抬钉子。rustup 装系统级 /usr/local；bindgen 用 cargo
-# --locked 源码构建，arm64/amd64 双基座都原生编译。
+# Rust for Linux 工具链 —— rustc 钉当前 stable（内核树 min-tool-version 是
+# 下限，真正硬约束是 rust-analyzer 扩展的 proc-macro ABI 窗口：proc-macro
+# 由旧 rustc 编出、新 RA 展开，span map 反序列化直接 panic——两端必须同代）。
+# 主线树升级后同步检查两处：scripts/min-tool-version.sh 下限 + RA 扩展代次。
+# rustup 装系统级 /usr/local；bindgen 用 cargo --locked 源码构建，arm64/amd64
+# 双基座都原生编译。抬 rustc 版本后须重建内核并重新生成 rust-project.json
+#（其 sysroot 路径内嵌工具链版本号）。
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:${PATH}
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-        sh -s -- -y --profile minimal --default-toolchain 1.85.0 \
+        sh -s -- -y --profile minimal --default-toolchain 1.98.0 \
         --component rust-src --component clippy --component rustfmt && \
     cargo install --locked --version 0.71.1 bindgen-cli && \
     rm -rf "${CARGO_HOME}/registry"
