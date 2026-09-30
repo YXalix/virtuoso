@@ -833,13 +833,11 @@ mod tests {
         // 加速首进：image 直用钉死工具链，不再本地 build Dockerfile.kernel
         assert!(v.get("build").is_none());
         assert_eq!(v["remoteUser"], "root");
-        assert!(
-            v["customizations"]["vscode"]["extensions"]
-                .as_array()
-                .unwrap()
-                .len()
-                == 2
-        );
+        let ext = v["customizations"]["vscode"]["extensions"]
+            .as_array()
+            .unwrap();
+        assert_eq!(ext.len(), 3);
+        assert!(ext.iter().any(|e| e == "rust-lang.rust-analyzer"));
     }
 
     #[test]
