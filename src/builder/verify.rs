@@ -181,6 +181,9 @@ pub(crate) enum RootfsDState {
 pub(crate) struct CheckInput<'a> {
     pub config_file_exists: bool,
     pub kernel_path: Option<&'a Path>,
+    /// kernel_path 的解析来源（"env KERNEL_PATH" / "current volume X" /
+    /// "config" / "auto-detected"），呈现用；None = 路径同样缺失。
+    pub kernel_path_source: Option<&'a str>,
     pub arch: Arch,
     pub host: HostOs,
     pub host_is_cross: bool,
@@ -335,12 +338,15 @@ fn check_host_tools(input: &CheckInput, checks: &mut Vec<Check>) {
     }
 }
 
-// 3/4. 内核来源：KERNEL_PATH 源码树
+// 3/4. 内核来源：解析后的内核源码树（env > current 卷 > toml > 缺省）
 fn check_kernel_source(input: &CheckInput, checks: &mut Vec<Check>) {
     match input.kernel_path.filter(|p| !p.as_os_str().is_empty()) {
         Some(p) => checks.push(pass(
             CheckKind::KernelPath,
-            format!("KERNEL_PATH: {}", p.display()),
+            match input.kernel_path_source {
+                Some(src) => format!("Kernel tree: {} ({src})", p.display()),
+                None => format!("Kernel tree: {}", p.display()),
+            },
             None,
         )),
         None => checks.push(fail(
@@ -401,7 +407,7 @@ fn check_kernel_image(input: &CheckInput, checks: &mut Vec<Check>) {
             Some(summary(img)),
         )),
         None => {
-            let hint = "build the kernel first";
+            let hint = "build the kernel first (virtuoso kernel build in docker mode)";
             checks.push(fail(
                 CheckKind::KernelImage,
                 format!(

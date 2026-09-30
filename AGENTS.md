@@ -24,8 +24,8 @@ QEMU 启动跑 `/tests/` → 串口标记协议判定 → verdict.json 落盘。
 ```bash
 virtuoso doctor             # 环境体检（✓/✗ 组件行；--verbose 全量诊断；--json）
 virtuoso build              # builder：重建 initrd.img / rootfs.img / tools.img（--busybox-only 仅备 BusyBox）
-virtuoso kernel clone <url> [--ref r] [--as vol] [--arch a]
-                            # forge：内核源码进 named volume（+ .clangd 渲染 + 写 current）
+virtuoso kernel clone <url> [--ref r] [--as vol] [--arch a] [--full]
+                            # forge：内核源码进 named volume（+ .clangd 渲染 + 写 current；--full 全量历史）
 virtuoso kernel build       # forge：容器 make Image/modules + 静态 bpftool + CDB（/ksrc 原始形态）
                             #   （另有 defconfig/path/shell/list/use；源码编辑走 devkit/docker devcontainer）
 virtuoso test --timeout 60  # 测试：launcher 启动 → judge 判定 → 工件落盘

@@ -71,10 +71,33 @@ pub(crate) fn infra_ko(infra_dir: &Path, module: &str) -> Option<PathBuf> {
     fallback.is_file().then_some(fallback)
 }
 
+/// 内核树 `modules.builtin` 里的内建模块名集合（basename，如 crc16）。该
+/// 文件由 `make modules` 生成在树根，与 .config 符号命名解耦（ext4 ↔
+/// EXT4_FS、mbcache ↔ FS_MBCACHE 这类 stem≠symbol 的跨版本差异不影响）。
+/// 文件缺失（未构建的树）= 空集合。
+pub(crate) fn builtin_modules(kernel_path: &Path) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    let Ok(text) = std::fs::read_to_string(kernel_path.join("modules.builtin")) else {
+        return set;
+    };
+    for line in text.lines() {
+        if let Some(stem) = Path::new(line.trim())
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            set.insert(stem.to_string());
+        }
+    }
+    set
+}
+
 /// 拷贝模块名清单声明的全部 `.ko` 到 dest，并把生成的 conf 文本写入
 /// `dest/<conf_name>`（VM 内 init 从 conf 读取加载顺序与 insmod 参数；
 /// 文本支持 `#` 注释与空行，两个 init 均跳过）。缺 `.ko` 构建期报错
-/// （退出码非 0，冻结语义）。
+/// （退出码非 0，冻结语义）——例外：清单条目在目标树里是**内建**
+/// （modules.builtin 命中）时跳过拷贝并从 conf 文本剔除对应行，init 无需
+/// 对已内建驱动 insmod（同一清单要跨内核树复用：crc16 在 openEuler 内建、
+/// 主线随 ext4=m 必为模块）。
 pub(crate) fn copy_module_list(
     dest: &Path,
     modules: &[String],
@@ -85,24 +108,50 @@ pub(crate) fn copy_module_list(
     progress: &mut Progress,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dest)?;
-    if modules.is_empty() {
-        progress.line("  (no kernel modules in this stage's list)");
-    } else {
-        progress.line(&format!("Copying {} kernel module(s)...", modules.len()));
-    }
+    let builtin = builtin_modules(kernel_path);
     let kos = if modules.is_empty() {
         BTreeMap::new()
     } else {
         collect_kos(kernel_path)
     };
+    // 逐条解析：树内 .ko → 内建（跳过）→ infra 兜底 → 报错。顺序保持声明序。
+    let mut resolved: Vec<(&String, PathBuf)> = Vec::new();
     for module in modules {
-        let Some(ko) = kos.get(module).cloned().or_else(|| infra_ko(infra_dir, module)) else {
+        if let Some(ko) = kos.get(module.as_str()).cloned() {
+            resolved.push((module, ko));
+        } else if builtin.contains(module.as_str()) {
+            progress.line(&format!("  {module}: builtin in kernel, skipped"));
+        } else if let Some(ko) = infra_ko(infra_dir, module) {
+            resolved.push((module, ko));
+        } else {
             anyhow::bail!("Module {module}.ko not found");
-        };
-        std::fs::copy(&ko, dest.join(format!("{module}.ko")))
+        }
+    }
+    if resolved.is_empty() {
+        progress.line("  (no kernel modules in this stage's list)");
+    } else {
+        progress.line(&format!(
+            "Copying {} kernel module(s)...",
+            resolved.len()
+        ));
+    }
+    for (module, ko) in &resolved {
+        std::fs::copy(ko, dest.join(format!("{module}.ko")))
             .with_context(|| format!("copy {} failed", ko.display()))?;
     }
-    std::fs::write(dest.join(conf_name), conf_text)
+    // 内建条目从 conf 文本剔除（按首 token 模块名匹配行）。
+    let filtered: String = conf_text
+        .lines()
+        .filter(|l| {
+            let name = l.split_whitespace().next().unwrap_or_default();
+            !builtin.contains(name)
+        })
+        .fold(String::new(), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        });
+    std::fs::write(dest.join(conf_name), filtered)
         .with_context(|| format!("write {conf_name} failed"))?;
     Ok(())
 }
@@ -221,6 +270,56 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("virtio.ko")).unwrap(), b"ko");
         assert_eq!(std::fs::read(dest.join("crc64.ko")).unwrap(), b"ko");
         assert_eq!(std::fs::read_to_string(dest.join("modules.conf")).unwrap(), "virtio\ncrc64\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builtin_module_is_skipped_from_copy_and_conf() {
+        // 同一 boot 清单跨树复用：crc16 在此树内建（modules.builtin 命中、
+        // 无 .ko 文件）→ 跳过拷贝 + conf 剔除；模块化的 virtio 照常拷贝。
+        let dir =
+            std::env::temp_dir().join(format!("builder-copybuiltin-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("tree/drivers")).unwrap();
+        std::fs::write(dir.join("tree/drivers/virtio.ko"), b"ko").unwrap();
+        std::fs::write(dir.join("tree/modules.builtin"), "kernel/lib/crc16.ko\n").unwrap();
+        let dest = dir.join("dest");
+        copy_module_list(
+            &dest,
+            &["crc16".into(), "virtio".into()],
+            "# rootfs\ncrc16\nvirtio\n",
+            "modules-boot.conf",
+            &dir.join("tree"),
+            &dir.join("infra"),
+            &mut Progress::stdout(),
+        )
+        .unwrap();
+        assert!(!dest.join("crc16.ko").exists(), "内建模块不得拷贝/insmod");
+        assert_eq!(std::fs::read(dest.join("virtio.ko")).unwrap(), b"ko");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("modules-boot.conf")).unwrap(),
+            "# rootfs\nvirtio\n",
+            "内建条目必须从 conf 文本剔除"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builtin_module_still_errors_when_absent_everywhere() {
+        // modules.builtin 未命中（真缺失/拼写错误）→ 冻结报错语义不变。
+        let dir = std::env::temp_dir().join(format!("builder-copymiss2-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("tree")).unwrap();
+        std::fs::write(dir.join("tree/modules.builtin"), "kernel/lib/crc16.ko\n").unwrap();
+        let err = copy_module_list(
+            &dir.join("dest"),
+            &["ghost".into()],
+            "ghost\n",
+            "modules.conf",
+            &dir.join("tree"),
+            &dir.join("infra"),
+            &mut Progress::stdout(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("ghost.ko not found"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

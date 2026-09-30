@@ -190,7 +190,11 @@ fn render(groups: &[GroupOut], tty: bool) -> String {
 /// crate::builder::verify::run_checks，doctor 的两种呈现自动跟随）。
 fn engine_report(cfg: &Config, arch: Arch, rootfs_d: RootfsDState) -> anyhow::Result<Report> {
     let host_arch = Arch::parse(std::env::consts::ARCH);
-    let kernel_path = cfg.kernel_path().ok().map(|(kp, _)| kp);
+    // 解析失败（如活动卷不可达）不遮蔽其余检查——docker_report 会给出细节
+    let (kernel_path, kernel_path_source) = match cfg.kernel_path() {
+        Ok((kp, src)) => (Some(kp), Some(src.to_string())),
+        Err(_) => (None, None),
+    };
     let supply = cfg.busybox_supply();
 
     let kernel_img = kernel_path.as_ref().map(|p| p.join(arch.kernel_img()));
@@ -201,6 +205,7 @@ fn engine_report(cfg: &Config, arch: Arch, rootfs_d: RootfsDState) -> anyhow::Re
     Ok(crate::builder::verify::run_checks(&crate::builder::verify::CheckInput {
         config_file_exists: cfg.toml.is_some(),
         kernel_path: kernel_path.as_deref(),
+        kernel_path_source: kernel_path_source.as_deref(),
         arch,
         host: crate::HostOs::current(),
         host_is_cross: host_arch.is_some_and(|h| h != arch),

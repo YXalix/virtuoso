@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::resolve_arch;
-use crate::config::Config;
+use crate::config::{Config, KernelPathSource};
 use crate::SkillAction;
 
 pub fn run_build(busybox_only: bool) -> anyhow::Result<i32> {
@@ -100,15 +100,13 @@ pub fn run_clean() -> anyhow::Result<i32> {
 
 pub fn run_skill(action: SkillAction) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
-    // 安装目标必须显式指定 KERNEL_PATH（不自动探测：探测到的树未必是用户想装入的树）
-    let kernel_path = match cfg.kernel_path() {
-        Ok((p, true)) => p,
-        Ok(_) | Err(_) => {
-            anyhow::bail!(
-                "KERNEL_PATH is not set.\n  Set kernel_path in virtuoso.toml (or the KERNEL_PATH env var)."
-            );
-        }
-    };
+    // 安装目标不自动探测（项目根上一级这种缺省树未必是想装入的树）；env
+    // KERNEL_PATH、toml kernel_path 与 current 活动卷都是明确指定。
+    let (kernel_path, source) = cfg.kernel_path()?;
+    anyhow::ensure!(
+        source != KernelPathSource::AutoDetect,
+        "KERNEL_PATH is not set.\n  Set kernel_path in virtuoso.toml, or switch the active volume with `virtuoso kernel use <volume>`."
+    );
     let kernel_path = kernel_path.display().to_string();
 
     match action {
@@ -123,7 +121,10 @@ pub fn run_skill(action: SkillAction) -> anyhow::Result<i32> {
                     .join("skills")
                     .join(skill)
                     .join("SKILL.md");
-                std::fs::copy(&src, dst_dir.join("SKILL.md"))?;
+                // fs::copy 在 macOS 走 fclonefileat，OrbStack 卷视图不支持克隆
+                // 语义（EPERM）——SKILL.md 是文本，读写两步绕开。
+                let body = std::fs::read_to_string(&src)?;
+                std::fs::write(dst_dir.join("SKILL.md"), body)?;
                 println!("  installed: {skill}");
             }
             println!(

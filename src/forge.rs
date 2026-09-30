@@ -8,8 +8,9 @@
 //! `.virtuoso/kernel-current.json`）。源码编辑走 VS Code devcontainer
 //! （容器内 clangd 吃 build 产出的 /ksrc 原始形态 compile_commands.json）。
 //!
-//! 测试主循环在宿主原生跑：KERNEL_PATH 指 `virtuoso kernel path` 的输出
-//! + `virtuoso doctor / build / test`。
+//! 测试主循环在宿主原生跑，内核树自动跟随活动卷（config 解析序：
+//! env KERNEL_PATH > current 活动卷 > toml kernel_path），`virtuoso
+//! doctor / build / test` 无需手动指路径。
 //!
 //! 分节：活动卷状态（current）→ volume 宿主视图与引擎守卫 → 工具链镜像
 //! 容器调用 → clone 流水线 → devcontainer 渲染。
@@ -433,9 +434,10 @@ fn uname_arch(arch: Arch) -> &'static str {
 
 /// kernel build 附加步：内核树内静态 bpftool（in-tree libbpf 同树链入，
 /// 版本与被测内核严格匹配——`btf dump`/`prog`/`map` 检视的控制面）。
-/// libelf.a 的 elf_compress 引 zstd，静态链接须显式 `-lzstd`（动态链接时
-/// 由 libelf.so 的 DT_NEEDED 隐式解决）。仅容器原生 arch 与目标同构时可行
-/// （静态 libelf/z/zstd 只按容器原生 arch 装包，交叉缺静态库）；失败不
+/// libelf.a 的 elf_compress 引 zstd，静态链接须显式 `-lzstd`；主线 6.12+
+/// 的 bpftool sign.c 引 libcrypto（EVP/PEM），须显式 `-lcrypto`（openEuler
+/// 6.6 树没有 sign.c，多链一个 .a 无害）。仅容器原生 arch 与目标同构时可行
+/// （静态 libelf/z/zstd/crypto 只按容器原生 arch 装包，交叉缺静态库）；失败不
 /// 致命——kernel make 的退出码不受影响，只 WARN 提示。
 pub(crate) fn bpftool_step(jobs: usize, arch: Arch) -> String {
     let uname = uname_arch(arch);
@@ -443,7 +445,7 @@ pub(crate) fn bpftool_step(jobs: usize, arch: Arch) -> String {
         "\
 if [ \"$(uname -m)\" = \"{uname}\" ]; then
   if env -u ARCH -u CROSS_COMPILE make -C tools/bpf/bpftool -j{jobs} \\
-    LDFLAGS=-static 'LIBS=$(LIBBPF) -lelf -lz -lzstd'; then
+    LDFLAGS=-static 'LIBS=$(LIBBPF) -lelf -lz -lzstd -lcrypto'; then
     echo 'bpftool: static build ready (tools/bpf/bpftool/bpftool)'
   else
     echo 'WARN: bpftool build failed — refresh the toolchain image (libzstd-dev, see devkit/docker/Dockerfile.kernel) or check the tree state'
@@ -511,10 +513,14 @@ pub(crate) struct CloneJob<'a> {
     pub ref_name: &'a str,
     pub image: &'a str,
     pub dockerfile_dir: &'a Path,
+    /// 全量历史克隆（缺省 false = `--depth 1` 只取树；学习用主目录开 true，
+    /// git log/blame 需要完整历史）。
+    pub full: bool,
 }
 
-/// 完整 clone：镜像供给 → 幂等建卷（已有内容拒绝）→ git clone --depth 1 →
-/// .clangd 按架构渲染进源码根 → 写 current。返回宿主可见路径。
+/// 完整 clone：镜像供给 → 幂等建卷（已有内容拒绝）→ git clone（缺省
+/// --depth 1，--full 全量历史）→ .clangd 按架构渲染进源码根 → 写 current。
+/// 返回宿主可见路径。
 pub(crate) fn clone_kernel(job: &CloneJob, progress: &mut Progress) -> anyhow::Result<PathBuf> {
     let CloneJob {
         project_root,
@@ -524,6 +530,7 @@ pub(crate) fn clone_kernel(job: &CloneJob, progress: &mut Progress) -> anyhow::R
         ref_name,
         image,
         dockerfile_dir,
+        full,
     } = *job;
     ensure_image(image, dockerfile_dir, progress)?;
 
@@ -543,11 +550,13 @@ pub(crate) fn clone_kernel(job: &CloneJob, progress: &mut Progress) -> anyhow::R
         "volume {volume_name} 已有内容（换 `--as <新卷名>`，或 `virtuoso kernel use` 切过去后走增量构建）"
     );
 
+    let depth = if full { "" } else { "--depth 1 " };
     progress.line(&format!(
-        "Kernel: cloning {url}@{ref_name} → volume {volume_name} ..."
+        "Kernel: cloning {url}@{ref_name} → volume {volume_name}{} ...",
+        if full { " (full history)" } else { "" }
     ));
     let script = format!(
-        "git clone --progress --depth 1 --branch {} {} /tmp/k && cp -a /tmp/k/. /ksrc/",
+        "git clone --progress {depth}--branch {} {} /tmp/k && cp -a /tmp/k/. /ksrc/",
         shell_quote(ref_name),
         shell_quote(url)
     );
@@ -760,11 +769,11 @@ mod tests {
     #[test]
     fn bpftool_step_pins_recipe_and_arch_guard() {
         let s = bpftool_step(16, Arch::Arm64);
-        // 同构守卫 + 静态配方（-lzstd 追加在 LIBS 尾部，链接顺序敏感）
+        // 同构守卫 + 静态配方（-lzstd/-lcrypto 追加在 LIBS 尾部，链接顺序敏感）
         assert!(s.contains("[ \"$(uname -m)\" = \"aarch64\" ]"));
         assert!(s.contains("env -u ARCH -u CROSS_COMPILE make -C tools/bpf/bpftool -j16"));
         assert!(s.contains("LDFLAGS=-static"));
-        assert!(s.contains("'LIBS=$(LIBBPF) -lelf -lz -lzstd'"));
+        assert!(s.contains("'LIBS=$(LIBBPF) -lelf -lz -lzstd -lcrypto'"));
         for a in [Arch::X86_64, Arch::Riscv64] {
             assert!(bpftool_step(4, a).contains(uname_arch(a)));
         }

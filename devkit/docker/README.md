@@ -32,7 +32,8 @@ OrbStack（doctor 会守卫引擎端点）。
 2. **性能**：volume 的 I/O 走容器原生文件系统，构建速度接近原生 Linux
    （bind-mount 走 virtiofs 慢 2–5 倍，别用）。
 3. **多内核切换**：每卷自含源码 + `.config` + 增量产物，切换 = 换卷名，
-   切回旧内核免重编；卷的创建成本接近零（clone 是 `--depth 1`）。
+   切回旧内核免重编；卷的创建成本接近零（clone 缺省 `--depth 1` 只取树；
+   要跟主线学习、需要 `git log/blame` 完整历史时加 `--full`，多下 ~3 GB）。
 
 ## 标准流程（首跑）
 
@@ -50,9 +51,11 @@ virtuoso kernel build              # Image/bzImage + modules + compile_commands.
 virtuoso kernel path
 ```
 
-然后 `virtuoso.toml` 里 `kernel_path` 指向 **`virtuoso kernel path` 的输出**
-（OrbStack 视图 / Linux volume 本体都是纯宿主路径，virtuoso 直接读
-Image 与 `.ko`），跑宿主主循环：
+内核树与 build/test/doctor 的闭环是**自动的**：`kernel use/clone` 写下的
+current 活动卷就是内核源码树（解析序 = env KERNEL_PATH > current 活动卷 >
+toml kernel_path > 缺省），OrbStack 视图 / Linux volume 本体都是纯宿主路径，
+virtuoso 直接读 Image 与 `.ko`。切卷即切换测试目标，无需手动改 `kernel_path`
+（该键只在 raw 模式——无活动卷时——生效）。跑宿主主循环：
 
 ```bash
 virtuoso doctor && virtuoso build && virtuoso test
@@ -62,7 +65,7 @@ virtuoso doctor && virtuoso build && virtuoso test
 
 ```bash
 virtuoso kernel clone <url> --ref OLK-6.6 --as ksrc-openEuler-6.6
-virtuoso kernel clone <url> --ref master      --as ksrc-mainline
+virtuoso kernel clone <url> --ref master      --as ksrc-mainline --full
 
 virtuoso kernel list        # 全部卷 + 内容状态（empty/cloned/configured）+ current 标记
 virtuoso kernel use ksrc-mainline   # 切 current（写 .virtuoso/kernel-current.json）

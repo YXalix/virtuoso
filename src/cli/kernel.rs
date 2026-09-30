@@ -23,11 +23,13 @@ pub fn run_kernel(action: KernelAction) -> anyhow::Result<i32> {
             ref_name,
             as_volume,
             arch,
+            full,
         } => run_clone(
             &url,
             ref_name.as_deref(),
             as_volume.as_deref(),
             arch.as_deref(),
+            full,
         ),
         KernelAction::Defconfig { name, arch } => run_defconfig(name.as_deref(), arch.as_deref()),
         KernelAction::Build { jobs, arch } => run_build(jobs, arch.as_deref()),
@@ -97,6 +99,7 @@ fn run_clone(
     cli_ref: Option<&str>,
     as_volume: Option<&str>,
     cli_arch: Option<&str>,
+    full: bool,
 ) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
     let volume = as_volume
@@ -119,6 +122,7 @@ fn run_clone(
             ref_name: &ref_name,
             image: &toolchain_image(),
             dockerfile_dir: &dockerfile_dir(&cfg),
+            full,
         },
         &mut progress,
     )?;
@@ -131,7 +135,9 @@ fn run_clone(
     println!(
         "Kernel: devcontainer rendered → .devcontainer/ (open this repo in VS Code → Reopen in Container to enter /ksrc)"
     );
-    println!("next: virtuoso kernel defconfig && virtuoso kernel build");
+    println!(
+        "next: build/test now follow this volume; a fresh clone has no Image yet → virtuoso kernel defconfig && virtuoso kernel build"
+    );
     Ok(0)
 }
 
@@ -267,6 +273,8 @@ fn run_use(volume: &str, cli_arch: Option<&str>) -> anyhow::Result<i32> {
     println!(
         "Kernel: devcontainer rendered → .devcontainer/ (open this repo in VS Code → Reopen in Container to enter /ksrc)"
     );
-    println!("next: virtuoso kernel path  # host-visible path for kernel_path (QEMU consumes it)");
+    println!(
+        "next: build/test now follow this volume (toml kernel_path only applies without an active volume)\n      tree without an Image yet → virtuoso kernel defconfig && virtuoso kernel build"
+    );
     Ok(0)
 }

@@ -145,6 +145,9 @@ enum KernelAction {
         /// Override the target arch (default: top-level arch; KERNEL_ARCH overrides)
         #[arg(long)]
         arch: Option<String>,
+        /// Full clone with complete git history (default: --depth 1, tree only)
+        #[arg(long)]
+        full: bool,
     },
     /// Run make <name> (.config lands in the volume)
     Defconfig {

@@ -123,6 +123,67 @@ impl Config {
 
 // ---------------------------------------------------------------- 全局标量访问器
 
+/// 内核源码树的解析来源（诊断如实呈现 + skill install 显式性判断）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KernelPathSource {
+    /// 进程环境 KERNEL_PATH（CI / 临时改参，恒最高——冻结不变量 5）
+    Env,
+    /// docker 模式活动卷（KERNEL_VOLUME env > current 状态文件 → 卷宿主视图）
+    CurrentVolume(String),
+    /// virtuoso.toml kernel_path（raw 模式显式指定）
+    Config,
+    /// 缺省自动探测 = 项目根上一级
+    AutoDetect,
+}
+
+impl std::fmt::Display for KernelPathSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KernelPathSource::Env => write!(f, "env KERNEL_PATH"),
+            KernelPathSource::CurrentVolume(v) => write!(f, "current volume {v}"),
+            KernelPathSource::Config => write!(f, "config"),
+            KernelPathSource::AutoDetect => write!(f, "auto-detected"),
+        }
+    }
+}
+
+/// 内核源码树解析（唯一入口，doctor/builder/skill/launcher 全走这里）：
+/// 进程环境 KERNEL_PATH > docker 活动卷 > toml kernel_path > 缺省项目根
+/// 上一级。活动卷压过 toml——`kernel use/clone` 是用户最近一次"我在哪棵
+/// 树上干活"的明确表态，切卷后 test 仍吃旧树正是 dual-source 困扰的根源；
+/// env 恒最高（同名标量键环境变量优先，冻结不变量 5）。视图解析经 view_of
+/// 注入（生产 = forge::host_view，测试 = 假实现）。
+fn resolve_kernel_path(
+    project_root: &Path,
+    toml_val: Option<&str>,
+    view_of: &dyn Fn(&str) -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<(PathBuf, KernelPathSource)> {
+    if let Some(p) = std::env::var("KERNEL_PATH").ok().filter(|v| !v.trim().is_empty()) {
+        return Ok((PathBuf::from(p), KernelPathSource::Env));
+    }
+    let volume = match std::env::var("KERNEL_VOLUME") {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        _ => crate::forge::read_current(project_root)?.map(|c| c.volume),
+    };
+    if let Some(v) = volume {
+        let view =
+            view_of(&v).with_context(|| format!("active kernel volume {v} is unreachable"))?;
+        anyhow::ensure!(
+            view.is_dir(),
+            "active kernel volume {v} host view {} is unreachable — start OrbStack (macOS) and retry",
+            view.display()
+        );
+        return Ok((view, KernelPathSource::CurrentVolume(v)));
+    }
+    if let Some(p) = toml_val.map(str::trim).filter(|v| !v.is_empty()) {
+        return Ok((PathBuf::from(p), KernelPathSource::Config));
+    }
+    let parent = project_root
+        .parent()
+        .context("project root has no parent, cannot auto-detect KERNEL_PATH")?;
+    Ok((parent.to_path_buf(), KernelPathSource::AutoDetect))
+}
+
 impl Config {
     /// 解析目标架构；无法解析时返回 None（诊断层告警）。
     pub fn arch(&self) -> Option<Arch> {
@@ -136,18 +197,15 @@ impl Config {
         scalar(self.tv(|t| &t.arch), "ARCH")
     }
 
-    /// (KERNEL_PATH, 是否显式指定)。未指定时 = 项目根上一级（qemu-e2e 自动探测语义）。
-    pub fn kernel_path(&self) -> anyhow::Result<(PathBuf, bool)> {
-        match scalar(self.tv(|t| &t.kernel_path), "KERNEL_PATH") {
-            Some(p) => Ok((PathBuf::from(p), true)),
-            None => {
-                let parent = self
-                    .project_root
-                    .parent()
-                    .context("project root has no parent, cannot auto-detect KERNEL_PATH")?;
-                Ok((parent.to_path_buf(), false))
-            }
-        }
+    /// 内核源码树解析：进程环境 KERNEL_PATH > docker 活动卷 > toml
+    /// kernel_path > 缺省项目根上一级。来源随路径一并返回（诊断呈现 +
+    /// 显式性判断），解析规则见 [`resolve_kernel_path`]。
+    pub fn kernel_path(&self) -> anyhow::Result<(PathBuf, KernelPathSource)> {
+        resolve_kernel_path(
+            &self.project_root,
+            self.tv(|t| &t.kernel_path).map(|v| v.0.as_str()),
+            &crate::forge::host_view,
+        )
     }
 
     /// kernel_image 覆盖（缺省 = 内核树内 arch 对应镜像）。
@@ -883,8 +941,118 @@ require = ["bpf"]
             None,
             &Some(vec!["nvme-core poll_queues=2".into(), "nvme-core".into()]),
         );
-        assert_eq!(plan.runtime, ["nvme-core poll_queues=2"]);
+        assert_eq!(plan.runtime, ["nvme-core poll_queues=2".to_string()]);
         plan.push(Some(Stage::Boot), &Some(vec!["nvme-core".into()]));
         assert_eq!(plan.boot_extra, ["nvme-core"], "去重只在同 stage 分区内");
+    }
+
+    // ---- 内核源码树解析：env > current 活动卷 > toml > 缺省 ----
+
+    /// 解析序测试共用互斥锁（env 改动是进程全局的）。
+    static KSRC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// scratch project_root + 可选 current 状态文件（volume, arch）。
+    fn ksrc_scratch(name: &str, current: Option<(&str, &str)>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cfg-ksrc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some((vol, arch)) = current {
+            let p = dir.join(".virtuoso").join("kernel-current.json");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!(r#"{{ "volume": "{vol}", "arch": "{arch}" }}"#)).unwrap();
+        }
+        dir
+    }
+
+    /// 假视图解析：volume → view_root/<volume>，目录真实存在（过 is_dir 守卫）。
+    fn fake_view_factory() -> (PathBuf, impl Fn(&str) -> anyhow::Result<PathBuf>) {
+        let root = std::env::temp_dir().join(format!("cfg-ksrc-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root2 = root.clone();
+        let view_of = move |v: &str| -> anyhow::Result<PathBuf> {
+            let p = root2.join(v);
+            std::fs::create_dir_all(&p)?;
+            Ok(p)
+        };
+        (root, view_of)
+    }
+
+    fn clear_kernel_env() {
+        std::env::remove_var("KERNEL_PATH");
+        std::env::remove_var("KERNEL_VOLUME");
+    }
+
+    #[test]
+    fn current_volume_overrides_toml_kernel_path() {
+        let _g = KSRC_LOCK.lock().unwrap();
+        clear_kernel_env();
+        let dir = ksrc_scratch("cur-toml", Some(("ksrc-mainline", "arm64")));
+        let (view_root, view_of) = fake_view_factory();
+        let (p, src) = resolve_kernel_path(&dir, Some("/old/tree"), &view_of).unwrap();
+        assert_eq!(p, view_root.join("ksrc-mainline"));
+        assert_eq!(
+            src,
+            KernelPathSource::CurrentVolume("ksrc-mainline".into()),
+            "切卷后内核树必须跟随活动卷，而非 toml 旧值"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&view_root);
+    }
+
+    #[test]
+    fn env_kernel_path_beats_everything() {
+        let _g = KSRC_LOCK.lock().unwrap();
+        std::env::set_var("KERNEL_PATH", "/env/tree");
+        let dir = ksrc_scratch("env-first", Some(("ksrc-mainline", "arm64")));
+        let (_, view_of) = fake_view_factory();
+        let (p, src) = resolve_kernel_path(&dir, Some("/toml/tree"), &view_of).unwrap();
+        assert_eq!(p, PathBuf::from("/env/tree"));
+        assert_eq!(src, KernelPathSource::Env);
+        clear_kernel_env();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toml_kernel_path_beats_autodetect() {
+        let _g = KSRC_LOCK.lock().unwrap();
+        clear_kernel_env();
+        let dir = ksrc_scratch("toml-only", None);
+        let (_, view_of) = fake_view_factory();
+        let (p, src) = resolve_kernel_path(&dir, Some("/toml/tree"), &view_of).unwrap();
+        assert_eq!(p, PathBuf::from("/toml/tree"));
+        assert_eq!(src, KernelPathSource::Config);
+        let (p, src) = resolve_kernel_path(&dir, None, &view_of).unwrap();
+        assert_eq!(p, dir.parent().unwrap());
+        assert_eq!(src, KernelPathSource::AutoDetect);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreachable_current_volume_is_an_error_not_silent_fallback() {
+        let _g = KSRC_LOCK.lock().unwrap();
+        clear_kernel_env();
+        let dir = ksrc_scratch("gone", Some(("vanished-vol", "arm64")));
+        // 视图解析成功但目录不存在（OrbStack 未运行形态）→ 报错而非吃 toml 旧树
+        let absent_root =
+            std::env::temp_dir().join(format!("cfg-ksrc-absent-{}", std::process::id()));
+        let absent = move |v: &str| -> anyhow::Result<PathBuf> {
+            Ok(absent_root.join(v)) // 不创建目录
+        };
+        let err = format!(
+            "{}",
+            resolve_kernel_path(&dir, Some("/old/tree"), &absent).unwrap_err()
+        );
+        assert!(
+            err.contains("vanished-vol") && err.contains("unreachable"),
+            "{err}"
+        );
+        // 视图解析本身失败（Linux 上 docker 缺位形态）→ 同样报错
+        let boom = |v: &str| -> anyhow::Result<PathBuf> {
+            anyhow::bail!("docker volume inspect {v} failed")
+        };
+        assert!(resolve_kernel_path(&dir, Some("/old/tree"), &boom).is_err());
+        clear_kernel_env();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

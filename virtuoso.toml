@@ -29,15 +29,17 @@ smp = 8
 auto_test = true
 
 # 内核源码树（构建期从内核树找 .ko / 内核镜像）。缺省 = 项目根上一级。
+# docker 模式下被活动卷覆盖：解析序 = env KERNEL_PATH > `kernel use/clone`
+# 写的 current 活动卷 > 本键 > 缺省。本键只在 raw 模式（无活动卷）生效。
 kernel_path = "/root/kernel"
 
 # 内核镜像覆盖（缺省 = 内核树内 arch 对应镜像）
 # kernel_image = "/path/to/Image"
 
 # docker 模式（容器化内核供给，devkit/docker/ 工具链镜像）：内核源码存 named
-# volume，`virtuoso kernel clone/defconfig/build` 进树干活，`virtuoso kernel
-# path` 打印宿主可见路径（指到上面 kernel_path 即闭环）。不占 toml 键——
-# 临时覆盖走环境变量：
+# volume，`virtuoso kernel clone/defconfig/build` 进树干活，build/test/doctor
+# 的内核树自动跟随活动卷（解析序 = env KERNEL_PATH > current 活动卷 > 上面的
+# kernel_path 键）。不占 toml 键——临时覆盖走环境变量：
 #   KERNEL_VOLUME            活动卷覆盖（current 状态文件 .virtuoso/kernel-current.json 之上）
 #   KERNEL_ARCH              目标架构覆盖（缺省 = 顶层 arch）
 #   KERNEL_REF               clone 缺省 ref（缺省 master）

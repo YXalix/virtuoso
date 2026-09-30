@@ -16,7 +16,7 @@
 | `timeout_secs` | `QEMU_TIMEOUT` | 墙钟超时秒数；0 一律拒绝 |
 | `smp` | `SMP` | vCPU 总数；多节点 NUMA 时必须被节点数整除（解析期报错，启动期二次校验） |
 | `auto_test` | `AUTO_TEST` | true = 跑完 `/tests/` 自动关机；false = 落入交互 shell |
-| `kernel_path` | `KERNEL_PATH` | 内核树路径（装置在树内时可自动探测） |
+| `kernel_path` | `KERNEL_PATH` | 内核树路径（装置在树内时可自动探测；**docker 模式下被活动卷覆盖**，仅 raw 模式生效——见下节解析序） |
 | `kernel_image` | `KERNEL_IMAGE` | 内核镜像覆盖（缺省 = 内核树内 arch 对应镜像） |
 | `qemu` | `QEMU` | QEMU 二进制覆盖（`QEMU=echo` 可打印 argv 对照） |
 | `qemu_opts` | `QEMU_OPTS` | 透传兜底参数数组（env 为空白切分；vfio 组件设备由装配点单独追加，不混入本链） |
@@ -32,6 +32,16 @@
 | `KERNEL_ARCH` | 目标架构覆盖（缺省 = 顶层 `arch`） |
 | `KERNEL_REF` | `kernel clone` 缺省 ref（缺省 master） |
 | `KERNEL_TOOLCHAIN_IMAGE` | 工具链镜像覆盖（缺省 ghcr.io/yxalix/virtuoso-kernel:latest；与 `KERNEL_IMAGE` 无关） |
+
+**内核树解析序**（build/test/doctor 消费哪棵树，唯一规则）：
+
+```
+env KERNEL_PATH > current 活动卷（KERNEL_VOLUME env > 状态文件）> toml kernel_path > 缺省（项目根上一级）
+```
+
+`kernel use/clone` 写下的活动卷压过 toml——切卷即切换测试目标，无需手动改
+`kernel_path`；env 临时覆盖恒最高。`kernel_path` 键只在 raw 模式（无活动卷）
+生效。
 
 ## `[components.*]` 组件段
 

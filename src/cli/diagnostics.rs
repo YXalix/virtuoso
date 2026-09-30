@@ -55,16 +55,8 @@ pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
 
     // 内核路径与镜像
     match cfg.kernel_path() {
-        Ok((kp, explicit)) => {
-            println!(
-                "  kernel_path: {} ({})",
-                kp.display(),
-                if explicit {
-                    "from config"
-                } else {
-                    "auto-detected"
-                }
-            );
+        Ok((kp, source)) => {
+            println!("  kernel_path: {} ({source})", kp.display());
             if let Some(arch) = cfg.arch() {
                 let img = kp.join(arch.kernel_img());
                 println!(
