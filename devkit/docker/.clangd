@@ -32,6 +32,11 @@ CompileFlags:
     - -mabi*
     - -mfpu*
     - -mfloat-abi*
+    # GCC-only 调试 flag：主线 defconfig 开 CONFIG_DEBUG_INFO_REDUCED=y 时
+    # Kbuild 注入（oe66 未开，故 oe66 时代模板未覆盖——clangd 对未知 -f
+    # 直接 fatal，后续 incomplete type / too many errors 全是级联噪声）
+    - -femit-struct-debug-baseonly
+    - -femit-struct-debug-detailed=*
     # 交叉链接期 flag，索引不消费
     - --param*
     - -falign-*
