@@ -19,6 +19,7 @@
 | `kernel_path` | `KERNEL_PATH` | 内核树路径（装置在树内时可自动探测；**docker 模式下被活动卷覆盖**，仅 raw 模式生效——见下节解析序） |
 | `kernel_image` | `KERNEL_IMAGE` | 内核镜像覆盖（缺省 = 内核树内 arch 对应镜像） |
 | `qemu` | `QEMU` | QEMU 二进制覆盖（`QEMU=echo` 可打印 argv 对照） |
+| `cmdline_extra` | `CMDLINE_EXTRA` | 内核 cmdline 追加段：原样整串拼在机器拼装基线之后（空缺省 = 基线不变）。内核参数 last-wins，追加即覆盖（如 `nokaslr initcall_debug loglevel=4`；`console=` 例外：注册为第二控制台，后者成为 preferred） |
 | `qemu_opts` | `QEMU_OPTS` | 透传兜底参数数组（env 为空白切分；vfio 组件设备由装配点单独追加，不混入本链） |
 
 ## docker 内核供给的环境变量（无 toml 键）

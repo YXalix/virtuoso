@@ -49,6 +49,10 @@ pub(crate) struct QemuInvocation {
     /// 节点）；None（缺省）argv 与基线逐字不变（冻结不变量 3）。
     /// 仅单节点 NUMA 支持；x86_64 无 DT 由调用方拒绝。
     pub pmem: Option<PmemSpec>,
+    /// 内核 cmdline 追加段（env `CMDLINE_EXTRA` / toml `cmdline_extra` 的
+    /// 文本注入口）：原样拼在机器拼装段之后；空缺省 argv 与冻结基线
+    /// 逐字一致（冻结不变量 3）。
+    pub cmdline_extra: String,
     /// 原样透传（shell 展开语义：按空白切分）
     pub extra_opts: Vec<String>,
 }
@@ -79,6 +83,7 @@ impl QemuInvocation {
             gdb_stub: false,
             agent_serial: None,
             pmem: None,
+            cmdline_extra: String::new(),
             extra_opts: Vec::new(),
         }
     }
@@ -148,6 +153,12 @@ impl QemuInvocation {
         self
     }
 
+    /// 追加内核 cmdline 文本段（trim 后整串拼入；空 = 冻结基线不变）。
+    pub(crate) fn cmdline_extra(mut self, extra: &str) -> Self {
+        self.cmdline_extra = extra.trim().to_string();
+        self
+    }
+
     pub(crate) fn extra_opts(mut self, opts: &[String]) -> Self {
         self.extra_opts = opts.to_vec();
         self
@@ -161,7 +172,8 @@ impl QemuInvocation {
 
     /// 内核 cmdline（run-qemu.sh 冻结文本；pmem 组件追加 mem= 把 pmem 区
     /// 从内核线性内存模型中排除，等价 x86 memmap= 语义；--only 追加
-    /// virtuoso.only= 供 init 过滤 /tests）。
+    /// virtuoso.only= 供 init 过滤 /tests；cmdline_extra 文本注入口拼在
+    /// 最末——内核参数 last-wins，追加即覆盖）。
     pub(crate) fn cmdline(&self) -> String {
         let mut cmd = format!(
             "console={} root=/dev/vda rw init=/init loglevel=8",
@@ -175,6 +187,10 @@ impl QemuInvocation {
         }
         if let Some(pmem) = &self.pmem {
             cmd.push_str(&format!(" mem={}", pmem.mem_limit));
+        }
+        if !self.cmdline_extra.is_empty() {
+            cmd.push(' ');
+            cmd.push_str(&self.cmdline_extra);
         }
         cmd
     }
@@ -215,6 +231,22 @@ mod tests {
         assert_eq!(
             sel.cmdline(),
             "console=ttyAMA0 root=/dev/vda rw init=/init loglevel=8 auto_test virtuoso.only=test-a,test-b"
+        );
+    }
+
+    #[test]
+    fn cmdline_extra_appends_text_and_empty_keeps_baseline() {
+        let base = QemuInvocation::new(Arch::Riscv64, "k", "i", "r");
+        // 空缺省 = 冻结基线逐字一致（不变量 3）
+        assert_eq!(
+            base.cmdline(),
+            "console=ttyS0 root=/dev/vda rw init=/init loglevel=8"
+        );
+        // 追加段 trim 后整串拼在最末（last-wins，追加即覆盖基线同名参数）
+        let tweaked = base.clone().cmdline_extra("  nokaslr loglevel=4  ");
+        assert_eq!(
+            tweaked.cmdline(),
+            "console=ttyS0 root=/dev/vda rw init=/init loglevel=8 nokaslr loglevel=4"
         );
     }
 

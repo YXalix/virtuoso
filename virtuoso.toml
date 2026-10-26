@@ -49,6 +49,11 @@ kernel_path = "/root/kernel"
 # QEMU 二进制覆盖（等价旧 QEMU= 语义）
 # qemu = "qemu-system-aarch64"
 
+# 内核 cmdline 追加段（env CMDLINE_EXTRA 同名覆盖）：原样整串拼在机器拼装
+# 基线之后（空缺省 = 基线不变）。内核参数 last-wins，追加即覆盖——调试旋钮
+# 不用重编本 crate（console= 例外：注册第二控制台，后者成 preferred）。
+# cmdline_extra = "nokaslr initcall_debug loglevel=4"
+
 # QEMU 透传兜底（数组，逐项透传；vfio 直通优先用组件，见下）
 # qemu_opts = ["-device ivshmem-plain,memdev=hostmem"]
 

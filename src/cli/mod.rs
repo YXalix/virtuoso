@@ -153,6 +153,7 @@ pub(crate) fn build_invocation(plan: &LaunchPlan) -> anyhow::Result<crate::launc
     .qemu_override(cfg.qemu_override().as_deref())
     .auto_test(plan.auto_test)
     .test_only(&plan.only_tests)
+    .cmdline_extra(cfg.cmdline_extra().as_deref().unwrap_or(""))
     .extra_opts(&extra);
     if let Some(sock) = &plan.agent_socket {
         inv = inv.agent_serial(sock);

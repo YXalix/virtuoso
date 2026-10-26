@@ -230,6 +230,14 @@ impl Config {
         scalar(self.tv(|t| &t.qemu), "QEMU")
     }
 
+    /// 内核 cmdline 追加段：`CMDLINE_EXTRA` 环境变量优先，否则 toml
+    /// `cmdline_extra`。原样整串追加在机器拼装基线之后（空缺省 = argv 与
+    /// 冻结基线逐字一致）；内核参数 last-wins，追加即覆盖（`console=`
+    /// 例外：注册为第二控制台，后者成为 preferred）。
+    pub fn cmdline_extra(&self) -> Option<String> {
+        scalar(self.tv(|t| &t.cmdline_extra), "CMDLINE_EXTRA")
+    }
+
     /// QEMU 透传参数（全局兜底）：`QEMU_OPTS` 环境变量（空白切分）优先，
     /// 否则 toml `qemu_opts` 数组。组件增量（vfio 设备等）不在此混入——
     /// 由装配点（cli::build_invocation）显式追加，全局兜底与组件增量分清。
@@ -491,6 +499,7 @@ pub struct VirtuosoToml {
     pub(crate) smp: Option<StrVal>,
     pub(crate) auto_test: Option<bool>,
     pub(crate) qemu: Option<StrVal>,
+    pub(crate) cmdline_extra: Option<StrVal>,
     pub(crate) qemu_opts: Option<Vec<String>>,
     pub(crate) components: Option<ComponentsSection>,
     pub(crate) busybox: Option<BusyboxSection>,
@@ -745,6 +754,7 @@ arch = "arm64"
 timeout_secs = 60
 smp = 4
 auto_test = false
+cmdline_extra = "nokaslr initcall_debug"
 qemu_opts = ["-device vfio-pci,host=01:00.0"]
 "#,
         )
@@ -753,6 +763,7 @@ qemu_opts = ["-device vfio-pci,host=01:00.0"]
         assert_eq!(cfg.timeout_secs.as_ref().unwrap().0, "60");
         assert_eq!(cfg.smp.as_ref().unwrap().0, "4");
         assert_eq!(cfg.auto_test, Some(false));
+        assert_eq!(cfg.cmdline_extra.as_ref().unwrap().0, "nokaslr initcall_debug");
         assert_eq!(cfg.qemu_opts.as_ref().unwrap().len(), 1);
     }
 
