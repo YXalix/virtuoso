@@ -1,12 +1,15 @@
-//! bpftool 供给（kernel build 顺带产物随 tools 盘）：`virtuoso kernel build`
-//! 在内核树内构建完全静态的 bpftool（in-tree libbpf 同树静态链入，版本与
-//! 被测内核严格匹配）——内核态 BTF/prog/map 检视的控制面。builder 只做
-//! 搬运：内核树 `tools/bpf/bpftool/bpftool` → tools 盘 `/bin/bpftool`
-//! （PATH 已由 tools 盘 hook 注入）。
+//! bpftool provisioning (a kernel build byproduct shipped on the tools
+//! disk): `virtuoso kernel build` builds a fully static bpftool inside the
+//! kernel tree (in-tree libbpf statically linked from the same tree,
+//! version strictly matching the kernel under test) — the control plane
+//! for kernel-side BTF/prog/map inspection. builder only ferries the
+//! binary: kernel tree `tools/bpf/bpftool/bpftool` → tools disk
+//! `/bin/bpftool` (PATH already injected by the tools disk hook).
 //!
-//! 树内无产物（未跑过 kernel build，或目标 arch 与容器不同构——静态
-//! libelf/z/zstd 只按容器原生 arch 装包）→ WARN 跳过，不致命：与
-//! tools workspace 的降级语义一致。
+//! No artifact in the tree (kernel build never ran, or the target arch
+//! differs from the container arch — static libelf/z/zstd packages are
+//! installed for the container-native arch only) → WARN and skip,
+//! non-fatal: consistent with the tools workspace degradation semantics.
 
 use std::path::Path;
 
@@ -14,7 +17,7 @@ use anyhow::Context;
 
 use crate::util::Progress;
 
-/// 搬运内核树内静态 bpftool 进 tools 盘 staging。返回 `Ok(true)` = 已装入。
+/// Copies the in-tree static bpftool into the tools disk staging. Returns `Ok(true)` if installed.
 pub(crate) fn install(
     kernel_path: &Path,
     dest_bin: &Path,
@@ -55,13 +58,13 @@ mod tests {
         let bin = tmp.join("tools/bin");
         let _ = std::fs::remove_dir_all(&tmp);
 
-        // 树内无产物 → WARN 跳过（false），staging 不落文件
+        // No artifact in tree → WARN and skip (false), nothing written to staging
         assert!(!install(&ksrc, &bin, &mut Progress::stdout()).unwrap());
-        // 非 ELF（树内半成品）→ 跳过
+        // Non-ELF (partial artifact in tree) → skip
         std::fs::create_dir_all(ksrc.join("tools/bpf/bpftool")).unwrap();
         std::fs::write(ksrc.join("tools/bpf/bpftool/bpftool"), b"not an elf").unwrap();
         assert!(!install(&ksrc, &bin, &mut Progress::stdout()).unwrap());
-        // ELF 产物 → 搬运 + 可执行位
+        // ELF artifact → copy + executable bit
         std::fs::write(ksrc.join("tools/bpf/bpftool/bpftool"), b"\x7fELFpayload").unwrap();
         assert!(install(&ksrc, &bin, &mut Progress::stdout()).unwrap());
         assert_eq!(

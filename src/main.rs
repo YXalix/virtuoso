@@ -1,9 +1,10 @@
-//! Virtuoso — kernel E2E 虚拟化测试装置的 CLI 入口。
+//! Virtuoso — CLI entry point of the kernel E2E virtualization test harness.
 //!
-//! 单包 crate（无 workspace 成员）：clap 定义与子命令分发在 `main`，命令
-//! 实现在 `cli`，运行工件在 `runs`，类型化配置在 `config`；领域模块
-//! `builder` / `launcher` / `judge` / `forge` 与顶层工具集 `util`、平台
-//! 类型 `arch` 同住 `src/`。
+//! Single-package crate (no workspace members): clap definitions and
+//! subcommand dispatch live in `main`, command implementations in `cli`,
+//! run artifacts in `runs`, typed configuration in `config`; the domain
+//! modules `builder` / `launcher` / `judge` / `forge` plus the top-level
+//! utility set `util` and platform types `arch` all live under `src/`.
 
 mod arch;
 mod builder;

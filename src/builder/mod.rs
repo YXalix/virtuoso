@@ -1,6 +1,7 @@
-//! builder — 构建器。Phase 2 从 `build-initrd.sh` / `fetch-busybox.sh`
-//! 接管：BusyBox 供给、C 用例编译、initramfs/rootfs 组装（行为等价移植，
-//! 消息文本与退出码语义对齐 shell 基线）。
+//! builder — the builder. Phase 2 takes over from `build-initrd.sh` /
+//! `fetch-busybox.sh`: BusyBox provisioning, C test body compilation,
+//! initramfs/rootfs assembly (behavior-equivalent port; message text and
+//! exit code semantics align with the shell baseline).
 
 pub(crate) mod bpftrace;
 pub(crate) mod bpftool;
@@ -20,8 +21,9 @@ use anyhow::Context;
 
 use crate::util::Progress;
 
-/// VM 内 init 的声明式注入钩子：片段插入 mount 之后、insmod 之前。
-/// 对应 rootfs 内的 `/init-hooks.sh`（缺省不存在，init 侧有守卫 source）。
+/// Declarative injection hooks for the in-VM init: snippets inserted after
+/// mounts and before insmods. Corresponds to `/init-hooks.sh` inside the
+/// rootfs (absent by default; the init side guard-sources it).
 #[derive(Debug, Clone)]
 pub(crate) struct InitHook {
     pub name: String,
@@ -37,9 +39,11 @@ impl InitHook {
     }
 }
 
-/// tools.img 挂载 hook（rootfs 内 `/init-hooks.sh` 的生成片段）：init 在
-/// devtmpfs 挂载后、insmod/agent 拉起前 source——virtio_blk 已由 initramfs
-/// 的 modules-boot.conf 加载，此处直接挂 /dev/vdb 并把工具目录注入 PATH。
+/// tools.img mount hook (a generated snippet of `/init-hooks.sh` in the
+/// rootfs): sourced by init after devtmpfs mounts and before insmod/agent
+/// startup — virtio_blk is already loaded by the initramfs's
+/// modules-boot.conf, so this mounts /dev/vdb directly and injects the
+/// tools directory into PATH.
 const TOOLS_DISK_HOOK: &str = r#"mkdir -p /tools
 if mount -t ext4 /dev/vdb /tools 2>/dev/null; then
     export PATH="/tools/bin:$PATH"
@@ -47,13 +51,15 @@ else
     LOG_WARN "tools disk not mounted (/dev/vdb missing or not ext4); tools unavailable"
 fi"#;
 
-/// 构建两段式引导对（build-initrd.sh 的 Rust 接管）：
-/// `target/artifacts/initrd.img`（initramfs：busybox + modules-boot.conf
-/// 基础集 + 组件 boot 附加 + init-initramfs）与 `target/artifacts/rootfs.img`
-/// （ext4：busybox + 组件 require 生成的 modules.conf + init + /tests）。
-/// 另产出 `target/artifacts/tools.img`（ext4：/bin 常驻工具，VM 内挂 /tools）——
-/// 工具被跳过时不产出。源资产读 `infra_dir`，暂存目录与 busybox 缓存放
-/// `build_dir`（target/build）。
+/// Builds the two-stage boot pair (Rust takeover of build-initrd.sh):
+/// `target/artifacts/initrd.img` (initramfs: busybox + the modules-boot.conf
+/// base set + component boot extras + init-initramfs) and
+/// `target/artifacts/rootfs.img` (ext4: busybox + modules.conf generated
+/// from component requires + init + /tests). Also produces
+/// `target/artifacts/tools.img` (ext4: resident /bin tools, mounted at
+/// /tools in the VM) — omitted when tools are skipped. Source assets are
+/// read from `infra_dir`; the staging dir and busybox cache live under
+/// `build_dir` (target/build).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_boot_pair(
     infra_dir: &Path,
@@ -68,7 +74,7 @@ pub(crate) fn build_boot_pair(
     bpf_enabled: bool,
     progress: &mut Progress,
 ) -> anyhow::Result<()> {
-    // 与脚本一致的先决检查
+    // Prerequisite checks matching the scripts
     if !kernel_path.join("arch").is_dir() {
         anyhow::bail!(
             "Cannot find kernel source directory at {}\nSet KERNEL_PATH environment variable to specify the location:\n  KERNEL_PATH=/path/to/kernel virtuoso build",
@@ -81,7 +87,7 @@ pub(crate) fn build_boot_pair(
     std::fs::create_dir_all(build_dir)?;
     std::fs::create_dir_all(artifacts_dir)?;
 
-    // 交叉接线（全宿主：CC 通道供 C 测试体；LINKER/rustflags 仅非 Linux）
+    // Cross wiring (all hosts: CC channel serves C test bodies; LINKER/rustflags on non-Linux only)
     let cross_setup = cross::setup(arch, build_dir)?;
     if let Some(note) = &cross_setup.note {
         progress.line(note);
@@ -154,8 +160,9 @@ pub(crate) fn build_boot_pair(
         &cross_setup,
         progress,
     )?;
-    // tools workspace（常驻工具）→ tools.img 的 /bin：与用例分类正交，见
-    // tools::install。装入成功才产出 tools.img 并注入挂载 hook（降级语义）。
+    // tools workspace (resident tools) → tools.img /bin: orthogonal to test
+    // case grouping, see tools::install. tools.img is produced and the mount
+    // hook injected only when installation succeeds (degradation semantics).
     let tools_dir = build_dir.join("tools");
     let tools_installed = tools::install(
         &infra_dir.join("tools"),
@@ -164,13 +171,16 @@ pub(crate) fn build_boot_pair(
         &cross_setup,
         progress,
     )?;
-    // bpftool（kernel build 顺带产物）：内核树静态 bpftool 搬进 /bin，与
-    // bpf-run 同为常驻 tools 盘一等工具（与组件开关无关）；树内无产物则
-    // WARN 跳过，见 bpftool::install。
+    // bpftool (a kernel build byproduct): the kernel tree's static bpftool
+    // is ferried into /bin, a first-class resident tool of the tools disk
+    // alongside bpf-run (independent of component switches); no artifact in
+    // the tree → WARN and skip, see bpftool::install.
     let bpftool_installed = bpftool::install(kernel_path, &tools_dir.join("bin"), progress)?;
-    // components.bpf（默认关）：bpftrace 官方 AppImage → 下载缓存 + 容器
-    // 解包（需要 docker，与 kernel 供给同依赖）→ 解包树进 tools 盘 /tools/nix，
-    // wrapper 落 /tools/bin/bpftrace（PATH 已由 tools 盘 hook 注入）。
+    // components.bpf (off by default): the official bpftrace AppImage →
+    // download cache + container extraction (needs docker, same dependency
+    // as kernel provisioning) → extracted tree into the tools disk
+    // /tools/nix, wrapper at /tools/bin/bpftrace (PATH already injected by
+    // the tools disk hook).
     let bpf_tar = if bpf_enabled {
         Some(bpftrace::ensure(build_dir, arch, progress)?)
     } else {
@@ -217,9 +227,10 @@ pub(crate) fn build_boot_pair(
     Ok(())
 }
 
-/// busybox 用户land 组装：静态二进制 + applet 符号链接 + 骨架目录 + root 账户。
-/// 符号链接由名单驱动（`busybox::applet_names`），不执行 guest 二进制 ——
-/// 交叉组装（含 macOS 宿主）无需宿主同构。
+/// busybox userland assembly: static binary + applet symlinks + skeleton
+/// dirs + root account. Symlinks are manifest-driven
+/// (`busybox::applet_names`); the guest binary is never executed — cross
+/// assembly (macOS hosts included) needs no host-arch match.
 pub(crate) fn assemble_busybox_tree(
     dest: &Path,
     busybox_bin: &Path,
@@ -247,7 +258,7 @@ pub(crate) fn assemble_busybox_tree(
     std::fs::copy(busybox_bin, dest.join("bin/busybox"))?;
     crate::util::set_executable(&dest.join("bin/busybox"))?;
 
-    // applet → bin/<name> 相对符号链接（目标恒 "busybox"，无需事后改写）
+    // applet → bin/<name> relative symlinks (target is always "busybox"; no post-rewrite needed)
     for name in applets {
         let link = dest.join("bin").join(name);
         if link.exists() || link.is_symlink() {
@@ -274,10 +285,12 @@ fn write_hooks(rootfs_dir: &Path, hooks: &[InitHook]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// rootfs.d 增量并入：仓库根 `rootfs.d/` 树映射到 rootfs 根（用户内容作为
-/// 源随每次构建进入 rootfs——只增不覆盖）。目录级并集（同名目录自由合并），
-/// 文件级必须新增：任何与组装产物同路径的文件都是构建期错误，没有覆盖
-/// 语义。缺省（无此目录）静默跳过。返回并入的文件数。
+/// rootfs.d additive merge: the repo-root `rootfs.d/` tree maps onto the
+/// rootfs root (user content enters the rootfs as source on every build —
+/// additive-only, never overwrites). Directory-level union (same-named
+/// dirs merge freely); file-level must be new: any file colliding with an
+/// assembled path is a build-time error — no overwrite semantics. Absent
+/// by default (no such dir): silently skipped. Returns the number of files merged.
 pub(crate) fn apply_rootfs_d(
     rootfs_dir: &Path,
     rootfs_d_dir: &Path,
@@ -288,7 +301,7 @@ pub(crate) fn apply_rootfs_d(
     }
     let mut count = 0usize;
     merge_tree(rootfs_dir, rootfs_d_dir, rootfs_d_dir, &mut count)?;
-    // 空目录与缺失同义（doctor 会建出空目录）：静默，不打 0 行噪音
+    // An empty dir is synonymous with missing (doctor creates it empty): stay silent, no zero-count noise line
     if count > 0 {
         progress.line(&format!("rootfs.d: {count} file(s) added"));
     }
@@ -360,7 +373,7 @@ mod tests {
             "#!/bin/sh\nexit 0"
         );
         assert_eq!(std::fs::read_to_string(staging.join("etc/motd")).unwrap(), "hello");
-        // 同名目录合并不破坏既有文件
+        // Same-named dir merge does not clobber existing files
         assert_eq!(std::fs::read_to_string(staging.join("etc/passwd")).unwrap(), "base");
         let _ = std::fs::remove_dir_all(&staging);
         let _ = std::fs::remove_dir_all(&add);
@@ -374,7 +387,7 @@ mod tests {
         mkfile(&add.join("etc/passwd"), "shadow");
         let mut progress = Progress::stdout();
         assert!(apply_rootfs_d(&staging, &add, &mut progress).is_err());
-        // 失败即停：既有文件未被覆盖
+        // Stops on failure: the existing file was not overwritten
         assert_eq!(std::fs::read_to_string(staging.join("etc/passwd")).unwrap(), "base");
         let _ = std::fs::remove_dir_all(&staging);
         let _ = std::fs::remove_dir_all(&add);

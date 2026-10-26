@@ -1,10 +1,14 @@
-//! 模块（KO）供给语义（build-initrd.sh 的 Rust 接管 + Phase 3 组件化）。
+//! Kernel module (KO) provisioning semantics (Rust takeover of
+//! build-initrd.sh + Phase 3 componentization).
 //!
-//! 两个清单：`modules-boot.conf`（initramfs，挂 root 前必需的冻结基础集，
-//! 文件在 infra/，boot 阶段附加组件条目追加在其后）与 `modules.conf`
-//! （rootfs，switch_root 后加载，**完全由组件 require 并集生成**，不再有
-//! 手写源文件）。行格式 `<module> [key=val ...]`：首 token 是模块名，
-//! 其余 token 由 VM 内 init 原样传给 insmod；`#` 注释与空行跳过。
+//! Two manifests: `modules-boot.conf` (initramfs; the frozen base set
+//! needed before mounting root, file lives in infra/, component boot-extra
+//! entries are appended after it) and `modules.conf` (rootfs; loaded after
+//! switch_root, **generated entirely from the union of component
+//! requires**, no hand-written source anymore). Line format
+//! `<module> [key=val ...]`: the first token is the module name, the rest
+//! are passed verbatim to insmod by the in-VM init; `#` comments and blank
+//! lines are skipped.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,20 +17,21 @@ use anyhow::Context;
 
 use crate::util::Progress;
 
-/// 组件计划投影出的模块清单：`boot_extra` 追加在 modules-boot.conf 冻结
-/// 基础集之后（initramfs 阶段），`runtime` 生成 /lib/modules/modules.conf。
+/// Module manifests projected from the component plan: `boot_extra` is
+/// appended after the frozen modules-boot.conf base set (initramfs stage);
+/// `runtime` generates /lib/modules/modules.conf.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Modules {
     pub boot_extra: Vec<String>,
     pub runtime: Vec<String>,
 }
 
-/// conf 行 / 组件 require 条目的模块名（首 token）。
+/// Module name (first token) of a conf line / component require entry.
 pub(crate) fn module_name(line: &str) -> &str {
     line.split_whitespace().next().unwrap_or_default()
 }
 
-/// 解析 conf 文件：返回模块名列表（保持声明顺序 —— 依赖手工排序是冻结语义）。
+/// Parses a conf file: returns the module name list (declaration order preserved — manual dependency ordering is frozen semantics).
 pub(crate) fn parse(conf: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(conf) else {
         return Vec::new();
@@ -38,10 +43,11 @@ pub(crate) fn parse(conf: &Path) -> Vec<String> {
         .collect()
 }
 
-/// 单次全树遍历收集内核树内全部 `<stem>.ko`：stem → 路径（同名 stem 取
-/// 首个命中，与逐模块 `find -print -quit` 的首个命中语义一致）。批量拷贝
-/// 与存在性检查共享这一遍遍历——逐模块 find 在慢卷（如 OrbStack NFS 视图）
-/// 上会放大成 N 次全树扫描。
+/// Collects every `<stem>.ko` in the kernel tree in a single walk:
+/// stem → path (for duplicate stems the first hit wins, matching the
+/// first-hit semantics of per-module `find -print -quit`). Batch copies and
+/// presence checks share this single walk — per-module find would amplify
+/// into N full-tree scans on slow volumes (e.g. an OrbStack NFS view).
 pub(crate) fn collect_kos(kernel_path: &Path) -> BTreeMap<String, PathBuf> {
     let mut map = BTreeMap::new();
     let Ok(out) = std::process::Command::new("find")
@@ -65,16 +71,17 @@ pub(crate) fn collect_kos(kernel_path: &Path) -> BTreeMap<String, PathBuf> {
     map
 }
 
-/// 内核树未命中时的兜底：`infra/testcases/<mod>.ko`（预置模块）。
+/// Fallback when the kernel tree misses: `infra/testcases/<mod>.ko` (prebuilt module).
 pub(crate) fn infra_ko(infra_dir: &Path, module: &str) -> Option<PathBuf> {
     let fallback = infra_dir.join("testcases").join(format!("{module}.ko"));
     fallback.is_file().then_some(fallback)
 }
 
-/// 内核树 `modules.builtin` 里的内建模块名集合（basename，如 crc16）。该
-/// 文件由 `make modules` 生成在树根，与 .config 符号命名解耦（ext4 ↔
-/// EXT4_FS、mbcache ↔ FS_MBCACHE 这类 stem≠symbol 的跨版本差异不影响）。
-/// 文件缺失（未构建的树）= 空集合。
+/// Set of builtin module names (basenames, e.g. crc16) from the kernel
+/// tree's `modules.builtin`. The file is generated at the tree root by
+/// `make modules`, decoupled from .config symbol naming (cross-version
+/// stem≠symbol differences such as ext4 ↔ EXT4_FS or mbcache ↔ FS_MBCACHE
+/// do not matter). Missing file (unbuilt tree) = empty set.
 pub(crate) fn builtin_modules(kernel_path: &Path) -> std::collections::BTreeSet<String> {
     let mut set = std::collections::BTreeSet::new();
     let Ok(text) = std::fs::read_to_string(kernel_path.join("modules.builtin")) else {
@@ -91,13 +98,15 @@ pub(crate) fn builtin_modules(kernel_path: &Path) -> std::collections::BTreeSet<
     set
 }
 
-/// 拷贝模块名清单声明的全部 `.ko` 到 dest，并把生成的 conf 文本写入
-/// `dest/<conf_name>`（VM 内 init 从 conf 读取加载顺序与 insmod 参数；
-/// 文本支持 `#` 注释与空行，两个 init 均跳过）。缺 `.ko` 构建期报错
-/// （退出码非 0，冻结语义）——例外：清单条目在目标树里是**内建**
-/// （modules.builtin 命中）时跳过拷贝并从 conf 文本剔除对应行，init 无需
-/// 对已内建驱动 insmod（同一清单要跨内核树复用：crc16 在 openEuler 内建、
-/// 主线随 ext4=m 必为模块）。
+/// Copies every `.ko` declared by the module name list to dest and writes
+/// the generated conf text to `dest/<conf_name>` (the in-VM init reads
+/// load order and insmod args from the conf; the text supports `#` comments
+/// and blank lines, skipped by both inits). A missing `.ko` is a build-time
+/// error (non-zero exit, frozen semantics) — exception: when a list entry
+/// is **builtin** in the target tree (hit in modules.builtin), the copy is
+/// skipped and the line removed from the conf text; init need not insmod a
+/// builtin driver (the same list is reused across kernel trees: crc16 is
+/// builtin in openEuler, while mainline builds it as a module when ext4=m).
 pub(crate) fn copy_module_list(
     dest: &Path,
     modules: &[String],
@@ -114,7 +123,7 @@ pub(crate) fn copy_module_list(
     } else {
         collect_kos(kernel_path)
     };
-    // 逐条解析：树内 .ko → 内建（跳过）→ infra 兜底 → 报错。顺序保持声明序。
+    // Resolve each entry: in-tree .ko → builtin (skip) → infra fallback → error. Declaration order preserved.
     let mut resolved: Vec<(&String, PathBuf)> = Vec::new();
     for module in modules {
         if let Some(ko) = kos.get(module.as_str()).cloned() {
@@ -139,7 +148,7 @@ pub(crate) fn copy_module_list(
         std::fs::copy(ko, dest.join(format!("{module}.ko")))
             .with_context(|| format!("copy {} failed", ko.display()))?;
     }
-    // 内建条目从 conf 文本剔除（按首 token 模块名匹配行）。
+    // Strip builtin entries from the conf text (lines matched by first-token module name).
     let filtered: String = conf_text
         .lines()
         .filter(|l| {
@@ -156,9 +165,9 @@ pub(crate) fn copy_module_list(
     Ok(())
 }
 
-/// 组装 initramfs 的 boot 清单：modules-boot.conf 冻结基础集 + 组件
-/// boot 附加条目（conf 文本 = 基础集原文 + 附加行，顺序即加载顺序）。
-/// 返回 (模块名清单, 生成 conf 文本)。
+/// Assembles the initramfs boot manifest: the frozen modules-boot.conf base
+/// set + component boot-extra entries (conf text = base verbatim + extra
+/// lines; order is load order). Returns (module name list, generated conf text).
 pub(crate) fn boot_set(base_conf: &Path, extra: &[String]) -> anyhow::Result<(Vec<String>, String)> {
     let mut names = parse(base_conf);
     let mut text = std::fs::read_to_string(base_conf).unwrap_or_default();
@@ -180,7 +189,7 @@ pub(crate) fn boot_set(base_conf: &Path, extra: &[String]) -> anyhow::Result<(Ve
     Ok((names, text))
 }
 
-/// 由 runtime 条目生成 modules.conf 文本（带生成头注释）。
+/// Generates the modules.conf text from runtime entries (with a generated header comment).
 pub(crate) fn runtime_conf_text(entries: &[String]) -> String {
     let mut text =
         String::from("# generated by builder from virtuoso.toml [components.*] require\n");
@@ -275,8 +284,9 @@ mod tests {
 
     #[test]
     fn builtin_module_is_skipped_from_copy_and_conf() {
-        // 同一 boot 清单跨树复用：crc16 在此树内建（modules.builtin 命中、
-        // 无 .ko 文件）→ 跳过拷贝 + conf 剔除；模块化的 virtio 照常拷贝。
+        // The same boot manifest reused across trees: crc16 is builtin in
+        // this tree (modules.builtin hit, no .ko file) → copy skipped +
+        // line stripped from conf; the modular virtio copies as usual.
         let dir =
             std::env::temp_dir().join(format!("builder-copybuiltin-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("tree/drivers")).unwrap();
@@ -293,19 +303,19 @@ mod tests {
             &mut Progress::stdout(),
         )
         .unwrap();
-        assert!(!dest.join("crc16.ko").exists(), "内建模块不得拷贝/insmod");
+        assert!(!dest.join("crc16.ko").exists(), "builtin modules must not be copied/insmodded");
         assert_eq!(std::fs::read(dest.join("virtio.ko")).unwrap(), b"ko");
         assert_eq!(
             std::fs::read_to_string(dest.join("modules-boot.conf")).unwrap(),
             "# rootfs\nvirtio\n",
-            "内建条目必须从 conf 文本剔除"
+            "builtin entries must be stripped from the conf text"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn builtin_module_still_errors_when_absent_everywhere() {
-        // modules.builtin 未命中（真缺失/拼写错误）→ 冻结报错语义不变。
+        // modules.builtin miss (truly missing/typo) → the frozen error semantics are unchanged.
         let dir = std::env::temp_dir().join(format!("builder-copymiss2-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("tree")).unwrap();
         std::fs::write(dir.join("tree/modules.builtin"), "kernel/lib/crc16.ko\n").unwrap();

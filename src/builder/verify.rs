@@ -1,12 +1,16 @@
-//! 前置检查引擎（verify.sh 的 Rust 接管）。输出文本与退出码语义对齐 shell
-//! 基线：critical FAIL → exit 1；WARN/INFO 不影响退出码。
+//! Prerequisite check engine (Rust takeover of verify.sh). Output text and
+//! exit code semantics align with the shell baseline: critical FAIL →
+//! exit 1; WARN/INFO do not affect the exit code.
 //!
-//! doctor 的两种呈现（一屏分组 / --verbose 全量）都消费本模块的 Report：
-//! 每条 Check 自带 `kind`（分组）与 `summary`（一屏紧凑短语，None = 不进
-//! 一屏）——新增前置条件只动引擎，呈现自动跟随，doctor 不做消息文本反解。
+//! Both doctor presentations (one-screen grouped / --verbose full) consume
+//! this module's Report: each Check carries its own `kind` (grouping) and
+//! `summary` (a compact one-screen phrase; None = excluded from the one
+//! screen) — new prerequisites only touch the engine and the presentation
+//! follows automatically; doctor never reverse-parses message text.
 //!
-//! 分节：类型与呈现（Check/CheckKind/Level/Report）→ 引擎输入与编排
-//! （CheckInput/run_checks）→ 逐项检查函数。
+//! Sections: types and presentation (Check/CheckKind/Level/Report) →
+//! engine input and orchestration (CheckInput/run_checks) → per-check
+//! functions.
 
 use std::path::Path;
 
@@ -14,9 +18,9 @@ use crate::{Arch, HostOs};
 
 use crate::builder::modconf;
 
-// ---------------------------------------------------------------- 类型与呈现
+// ---------------------------------------------------------------- types and presentation
 
-/// 检查主题（doctor 一屏分组的唯一依据；grouping 与 label 同源，无文本反解）。
+/// Check subject (the sole basis for doctor one-screen grouping; grouping and label share a source, no text reverse-parsing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckKind {
     Config,
@@ -37,7 +41,7 @@ pub(crate) enum CheckKind {
 }
 
 impl CheckKind {
-    /// 消息标签（msg 以 "<label>: " 开头；doctor 剥前缀取正文）。
+    /// Message label (msg starts with "<label>: "; doctor strips the prefix for the body).
     pub(crate) fn label(self) -> &'static str {
         match self {
             CheckKind::Config => "Configuration",
@@ -72,11 +76,11 @@ pub(crate) struct Check {
     pub level: Level,
     pub kind: CheckKind,
     pub msg: String,
-    /// 一屏紧凑短语（Pass/Info 用；None = 不进一屏，如纯可选信息行）。
+    /// Compact one-screen phrase (for Pass/Info; None = excluded from the one screen, e.g. purely optional info lines).
     pub summary: Option<String>,
 }
 
-/// msg 的 "<label>: " 前缀之后正文（Fail/Warn 逐行修复提示）。
+/// Body after the msg's "<label>: " prefix (the per-line fix hint for Fail/Warn).
 pub(crate) fn detail(kind: CheckKind, msg: &str) -> &str {
     msg.strip_prefix(kind.label())
         .map(|r| r.trim_start_matches([':', ' ']))
@@ -117,7 +121,7 @@ pub(crate) struct Report {
 }
 
 impl Report {
-    /// 追加检查并重算计数（doctor 附加 docker 供给组用）。
+    /// Appends checks and recomputes counts (used by doctor to attach the docker provisioning group).
     pub(crate) fn extend(&mut self, extra: Vec<Check>) {
         self.checks.extend(extra);
         self.recount();
@@ -141,7 +145,7 @@ impl Report {
             .count() as u32;
     }
 
-    /// 渲染（tty 下着色；--verbose 全量清单）。
+    /// Renders (colored on tty; --verbose prints the full list).
     pub(crate) fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&crate::util::bold("[DOCTOR] QEMU E2E Prerequisites Check"));
@@ -159,30 +163,32 @@ impl Report {
     }
 }
 
-/// 仅影响颜色，不影响判定（doctor 呈现层共用同一 NO_COLOR 语义）。
+/// Affects color only, not verdicts (the doctor presentation layers share the same NO_COLOR semantics).
 pub(crate) fn is_stdout_tty() -> bool {
     crate::util::tty()
 }
 
-// ---------------------------------------------------------------- 引擎输入与编排
+// ---------------------------------------------------------------- engine input and orchestration
 
-/// rootfs.d drop-in 状态（目录不随 clone 分发；doctor 负责缺失即创建，
-/// 见 cli::doctor::ensure_rootfs_d，本引擎只读状态）。
+/// rootfs.d drop-in state (the directory is not distributed with clone;
+/// doctor creates it when missing, see cli::doctor::ensure_rootfs_d; this
+/// engine only reads state).
 pub(crate) enum RootfsDState {
-    /// 目录就绪：files = 将并入的文件数；created = 本次运行刚创建。
+    /// Directory ready: files = number of files to be merged; created = just created this run.
     Ready { files: usize, created: bool },
-    /// 路径存在但不是目录（drop-in 不生效）。
+    /// Path exists but is not a directory (drop-in inactive).
     NotADir,
-    /// 不存在（err = 创建失败原因；None = 调用方未尝试创建）。
+    /// Does not exist (err = why creation failed; None = caller did not attempt creation).
     Absent { err: Option<String> },
 }
 
-/// 检查引擎输入（doctor / engine_report 投影；一次装配，免长参数表）。
+/// Check engine input (projected by doctor / engine_report; assembled once, avoiding a long parameter list).
 pub(crate) struct CheckInput<'a> {
     pub config_file_exists: bool,
     pub kernel_path: Option<&'a Path>,
-    /// kernel_path 的解析来源（"env KERNEL_PATH" / "current volume X" /
-    /// "config" / "auto-detected"），呈现用；None = 路径同样缺失。
+    /// Where kernel_path was resolved from ("env KERNEL_PATH" / "current
+    /// volume X" / "config" / "auto-detected"), for presentation; None = the
+    /// path is missing too.
     pub kernel_path_source: Option<&'a str>,
     pub arch: Arch,
     pub host: HostOs,
@@ -190,7 +196,7 @@ pub(crate) struct CheckInput<'a> {
     pub kernel_image: Option<&'a Path>,
     pub qemu_bin: Option<&'a str>,
     pub qemu_override: Option<&'a str>,
-    /// (模块名, .ko 是否找到)
+    /// (module name, whether the .ko was found)
     pub modules: &'a [(String, bool)],
     pub busybox_cached: bool,
     pub tools_img_exists: bool,
@@ -200,8 +206,8 @@ pub(crate) struct CheckInput<'a> {
     pub rootfs_d: RootfsDState,
 }
 
-/// 运行全部检查（verify.sh 的 11 项 + 组件平台门 + rootfs.d drop-in），
-/// 逐项独立成函数。
+/// Runs all checks (verify.sh's 11 items + component platform gates +
+/// rootfs.d drop-in), each as an independent function.
 pub(crate) fn run_checks(input: &CheckInput) -> Report {
     let mut checks = Vec::new();
     check_config(input, &mut checks);
@@ -228,24 +234,26 @@ pub(crate) fn run_checks(input: &CheckInput) -> Report {
     }
 }
 
-// ---------------------------------------------------------------- 逐项检查函数
+// ---------------------------------------------------------------- per-check functions
 
-/// 宿主工具表（平台无关）。make/sed 随 busybox 源码兜底退役；initrd 打包
-/// 已原生化（builder::cpio），cpio/gzip/wget/nproc/timeout 不再是硬需求；
-/// 下载层 wget 缺失时有 curl 回退。
-/// testcases 全走 cargo（build.rs + cc）后 C 编译器统一 zig cc 包装
-/// （builder::cross），cmake 随 CMake 路径退役。
+/// Host tools table (platform-independent). make/sed retired along with the
+/// busybox source fallback; initrd packing is now native (builder::cpio),
+/// so cpio/gzip/wget/nproc/timeout are no longer hard requirements; the
+/// download layer falls back to curl when wget is missing.
+/// With testcases all on cargo (build.rs + cc), the C compiler is uniformly
+/// the zig cc wrapper (builder::cross), and cmake retired along the CMake path.
 pub(crate) fn host_tools() -> &'static [&'static str] {
     &["tar", "zig", "find"]
 }
 
-/// 下载工具（busybox 供给层）：wget 或 curl 任一（macOS 自带 curl）。
+/// Download tool (busybox supply layer): either wget or curl (macOS ships curl).
 fn fetch_tool_ok() -> bool {
     crate::util::which("wget") || crate::util::which("curl")
 }
 
-/// 组件计划条目（conf 行）的模块是否都能在内核树找到（模块检查的输入收集）。
-/// `kernel_path` 为 None（未配置内核树）时全部记为未找到。
+/// Whether every module from component plan entries (conf lines) can be
+/// found in the kernel tree (input collection for the module check).
+/// When `kernel_path` is None (no kernel tree configured), everything counts as not found.
 pub(crate) fn module_presence(
     module_lines: &[String],
     kernel_path: Option<&Path>,
@@ -287,7 +295,7 @@ fn check_config(input: &CheckInput, checks: &mut Vec<Check>) {
     }
 }
 
-// 2. Host tools（平台无关表 + 下载/镜像/交叉工具链）
+// 2. Host tools (platform-independent table + download/image/cross toolchains)
 fn check_host_tools(input: &CheckInput, checks: &mut Vec<Check>) {
     let host = input.host;
     let tools = host_tools();
@@ -302,7 +310,7 @@ fn check_host_tools(input: &CheckInput, checks: &mut Vec<Check>) {
     if crate::builder::image::find_mke2fs().is_none() {
         missing.push("mke2fs".into());
     }
-    // C 用例编译器：Linux = 宿主 gcc/cc；macOS = CC env 或 zig（交叉）
+    // C test case compiler: Linux = host gcc/cc; macOS = CC env or zig (cross)
     let cc_ok = if host == HostOs::Darwin {
         std::env::var_os("CC").is_some() || crate::util::which("zig")
     } else {
@@ -327,7 +335,7 @@ fn check_host_tools(input: &CheckInput, checks: &mut Vec<Check>) {
         ));
     } else {
         let hint = if missing.iter().any(|m| m.starts_with("mke2fs")) && host == HostOs::Darwin {
-            " (brew install e2fsprogs; keg-only 路径已自动探测)"
+            " (brew install e2fsprogs; keg-only paths are probed automatically)"
         } else {
             ""
         };
@@ -338,7 +346,7 @@ fn check_host_tools(input: &CheckInput, checks: &mut Vec<Check>) {
     }
 }
 
-// 3/4. 内核来源：解析后的内核源码树（env > current 卷 > toml > 缺省）
+// 3/4. Kernel origin: the resolved kernel source tree (env > current volume > toml > default)
 fn check_kernel_source(input: &CheckInput, checks: &mut Vec<Check>) {
     match input.kernel_path.filter(|p| !p.as_os_str().is_empty()) {
         Some(p) => checks.push(pass(
@@ -463,7 +471,7 @@ fn check_qemu(input: &CheckInput, checks: &mut Vec<Check>) {
     }
 }
 
-// 7. Kernel modules（WARN，不判死；清单 = 启用组件 require 并集 + boot 基础集附加）
+// 7. Kernel modules (WARN, never fatal; list = union of enabled component requires + boot base set extras)
 fn check_modules(input: &CheckInput, checks: &mut Vec<Check>) {
     if input.modules.is_empty() {
         checks.push(info(
@@ -524,7 +532,7 @@ fn check_cross(input: &CheckInput, checks: &mut Vec<Check>) {
         checks.push(warn(
             CheckKind::CrossCompile,
             format!(
-                "Cross-compile: ARCH={} differs from host ({}); C 用例走 zig/CC，Rust 走 rustup musl target",
+                "Cross-compile: ARCH={} differs from host ({}); C test cases go through zig/CC, Rust through the rustup musl target",
                 input.arch.name(),
                 std::env::consts::ARCH
             ),
@@ -573,14 +581,15 @@ fn check_initrd(input: &CheckInput, checks: &mut Vec<Check>) {
     }
 }
 
-// 12. 组件平台门：vfio 架构性依赖 Linux（IOMMU + vfio-pci）；pmem 的
-// memory-backend-file/dumpdtb 链路在 macOS 上未经实测（brew dtc 可得）
+// 12. Component platform gates: vfio architecturally requires Linux (IOMMU
+// + vfio-pci); the pmem memory-backend-file/dumpdtb chain is untested on
+// macOS (brew dtc provides it)
 fn check_components(input: &CheckInput, checks: &mut Vec<Check>) {
     if input.vfio_enabled {
         if input.host == HostOs::Darwin {
             checks.push(fail(
                 CheckKind::Components,
-                "Components: vfio requires Linux host (IOMMU + vfio-pci) — 关闭 [components.vfio]",
+                "Components: vfio requires Linux host (IOMMU + vfio-pci) — disable [components.vfio]",
             ));
         } else {
             checks.push(pass(
@@ -593,12 +602,12 @@ fn check_components(input: &CheckInput, checks: &mut Vec<Check>) {
     if input.pmem_enabled && input.host == HostOs::Darwin {
         checks.push(warn(
             CheckKind::Components,
-            "Components: pmem on macOS is experimental (memory-backend-file + dumpdtb/fdtput 未在 HVF 实测)",
+            "Components: pmem on macOS is experimental (memory-backend-file + dumpdtb/fdtput untested under HVF)",
         ));
     }
 }
 
-// 13. rootfs.d drop-in（可选用户目录，不判死；doctor 负责缺失即创建）
+// 13. rootfs.d drop-in (optional user dir, never fatal; doctor creates it when missing)
 fn check_rootfs_d(input: &CheckInput, checks: &mut Vec<Check>) {
     let hint = "drop-in dir; merged into rootfs at build (add-only)";
     match &input.rootfs_d {
@@ -633,8 +642,9 @@ fn check_rootfs_d(input: &CheckInput, checks: &mut Vec<Check>) {
     }
 }
 
-/// docker 供给模式（forge 活动卷）检查：仅在状态文件存在（活动卷开启）时
-/// 由 doctor 投影附加——raw 用户无状态文件，零打扰。
+/// Docker provisioning mode (forge active volume) checks: attached by the
+/// doctor projection only when the state file exists (active volume on) —
+/// raw users have no state file and see zero noise.
 pub(crate) fn kernel_docker_checks(
     volume: &str,
     arch: &str,
@@ -645,7 +655,7 @@ pub(crate) fn kernel_docker_checks(
 ) -> Vec<Check> {
     let mut checks = Vec::new();
     match engine_err {
-        // engine ok 行无独立信息量：组状态由其余行决定，不进一屏
+        // The engine ok line carries no standalone information: group status is decided by the other lines, excluded from the one screen
         None => checks.push(pass(
             CheckKind::KernelDocker,
             "Kernel docker: engine ok",
@@ -699,7 +709,7 @@ fn kernel_version(kernel: &Path) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("."))
 }
 
-// ---------------------------------------------------------------- 测试
+// ---------------------------------------------------------------- tests
 
 #[cfg(test)]
 mod tests {
@@ -715,7 +725,7 @@ mod tests {
             "qemu-system-arm not found"
         );
         assert_eq!(detail(CheckKind::BusyBox, "BusyBox: cached (arm64)"), "cached (arm64)");
-        // 未以 label 开头的消息原样保留（防御性）
+        // Messages not starting with the label are kept verbatim (defensive)
         assert_eq!(detail(CheckKind::Config, "bare text"), "bare text");
     }
 }

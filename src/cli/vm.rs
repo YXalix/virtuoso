@@ -1,7 +1,7 @@
-//! VM 会话命令：shell / test。
-//! 启动 DSL、进程治理与看门狗在 launcher；判定在 judge。
-//! 本模块做接线：构建（builder）→ 启动（launcher）→ 超时收割 →
-//! 判定与工件（judge + runs）。
+//! VM session commands: shell / test.
+//! The launch DSL, process governance, and watchdog live in launcher; verdict/judging in judge.
+//! This module wires: build (builder) → launch (launcher) → timeout reaping →
+//! verdict and artifacts (judge + runs).
 
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 use std::time::Instant;
@@ -14,8 +14,8 @@ use super::{build_invocation, open_agent_socket, resolve_arch, resolve_topology,
 use crate::config::Config;
 use crate::runs;
 
-/// CLI accel 解析：`--kvm` / `--tcg` 显式指定，缺省走平台规则
-/// （macOS 同构 HVF，其余 TCG）。`--kvm --tcg` 互斥。
+/// CLI accel resolution: `--kvm` / `--tcg` are explicit; the default follows platform
+/// rules (HVF on same-arch macOS, TCG elsewhere). `--kvm --tcg` are mutually exclusive.
 pub(crate) fn resolve_accel(kvm: bool, tcg: bool, arch: Arch) -> anyhow::Result<Accel> {
     if kvm && tcg {
         anyhow::bail!("--kvm and --tcg are mutually exclusive");
@@ -35,7 +35,8 @@ pub fn run_shell(kvm: bool, tcg: bool, gdb: bool) -> anyhow::Result<i32> {
     if gdb && kvm {
         anyhow::bail!("--gdb and --kvm are mutually exclusive (single-stepping needs TCG)");
     }
-    // --gdb：挂起等 GDB 连接，恒 TCG（单步可靠）；其余走平台 accel 规则
+    // --gdb: suspend waiting for a GDB connection, always TCG (reliable
+    // single-stepping); others follow the platform accel rules
     let accel = if gdb {
         Accel::Tcg
     } else {
@@ -44,7 +45,8 @@ pub fn run_shell(kvm: bool, tcg: bool, gdb: bool) -> anyhow::Result<i32> {
     run_vm_session(accel, gdb)
 }
 
-/// 交互式会话（shell，含 --gdb 调试挂起）：stdio 继承，不产运行工件。
+/// Interactive session (shell, including the --gdb debug suspend): stdio inherited,
+/// no run artifacts produced.
 fn run_vm_session(accel: Accel, gdb_stub: bool) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
     let arch = resolve_arch(&cfg, None)?;
@@ -80,11 +82,13 @@ fn run_vm_session(accel: Accel, gdb_stub: bool) -> anyhow::Result<i32> {
     Ok(super::code_of(st))
 }
 
-/// CI 模式：构建 → 启动（launcher）→ 超时看门狗（KILL 收割，124）→
-/// judge 判定 → 运行工件。退出码 0=通过、124=超时、其余=失败。
-/// `replay_until_fail > 1` 时返场重试：首个非 passed verdict 即停。
-/// accel 缺省走平台规则（macOS 同构 HVF，Linux 恒 TCG）；`--tcg` 强制纯模拟。
-/// `only` 非空时 cmdline 追加 virtuoso.only=，init 只跑名单内的 /tests 二进制。
+/// CI mode: build → launch (launcher) → timeout watchdog (KILL reaping, 124) →
+/// judge verdict → run artifacts. Exit codes: 0=pass, 124=timeout, otherwise failure.
+/// With `replay_until_fail > 1`, replay retries: stop at the first non-passed verdict.
+/// accel defaults to platform rules (HVF on same-arch macOS, always TCG on Linux);
+/// `--tcg` forces pure emulation.
+/// When `only` is non-empty, the cmdline gets virtuoso.only= appended and init runs
+/// only the listed /tests binaries.
 pub fn run_test(
     cli_timeout: Option<u64>,
     cli_arch: Option<&str>,
@@ -117,9 +121,10 @@ pub fn run_test(
     Ok(last_code)
 }
 
-/// `--only` 名单合法性：条目是测例名（平铺 basename 或 `组名/用例名`）或
-/// 组选择（尾斜杠 `组名/`）——非空、无逗号/空白（逗号是 init 侧的名单
-/// 分隔符，空白会拆坏 cmdline token）。
+/// `--only` list validation: an entry is a test case name (flat basename or
+/// `group/case`) or a group selection (trailing slash `group/`) — non-empty, no
+/// commas/whitespace (a comma is the init-side list separator, and whitespace would
+/// break cmdline tokens).
 fn validate_only(only: &[String]) -> anyhow::Result<()> {
     for name in only {
         if name.trim().is_empty() || name.contains(|c: char| c.is_whitespace() || c == ',') {
@@ -142,8 +147,9 @@ fn resolve_timeout(cfg: &Config, cli_timeout: Option<u64>) -> anyhow::Result<u64
     raw.trim().parse().context("QEMU_TIMEOUT must be a number")
 }
 
-/// 单次完整测试，返回 (退出码, verdict 字符串)。
-/// `accel_override` = None 时按平台规则（--tcg 语义由调用方折算）。
+/// One complete test run; returns (exit code, verdict string).
+/// When `accel_override` is None, follow platform rules (--tcg semantics are folded
+/// in by the caller).
 fn test_once(
     cfg: &Config,
     cli_arch: Option<&str>,
@@ -160,7 +166,7 @@ fn test_once(
     let run = runs::create_run_dir(&cfg.project_root, arch.name())?;
     println!("[RUN] artifacts: {}", run.path.display());
 
-    // ---- 构建（builder）----
+    // ---- build (builder) ----
     let build_started = Instant::now();
     if let Err(e) = super::build::build_pair_for(cfg, Some(&run.path.join("build.log")), &[]) {
         let meta = build_failed_meta(
@@ -171,14 +177,14 @@ fn test_once(
         );
         runs::finalize_run(&run, &meta)?;
         runs::prune(&cfg.project_root, runs::RUNS_KEEP);
-        // 单一 ERROR 打印点在 main（bail 携带现场与工件路径）
+        // The single ERROR print site is in main (the bail carries the context and artifact paths)
         return Err(e.context(format!(
             "initrd build failed; artifacts: {}",
             run.path.display()
         )));
     }
 
-    // ---- 启动（launcher；判定在 judge）----
+    // ---- launch (launcher; verdict in judge) ----
     let started = Instant::now();
     let inv = build_invocation(&LaunchPlan {
         cfg,
@@ -193,7 +199,8 @@ fn test_once(
     println!("Running QEMU test with {timeout_secs}s timeout...");
     let (mut child, mut sup) = inv.spawn_supervised(true)?;
 
-    // 墙钟看门狗：到点 KILL 进程组（等价 timeout --signal=KILL 的 124 语义）
+    // Wall-clock watchdog: KILLs the process group when due (equivalent to
+    // timeout --signal=KILL's 124 semantics)
     let timed_out = Arc::new(AtomicBool::new(false));
     let watchdog =
         crate::launcher::spawn_watchdog(sup.pgid(), timeout_secs, Arc::clone(&timed_out));
@@ -209,8 +216,9 @@ fn test_once(
     timed_out.store(true, Ordering::SeqCst);
     let _ = watchdog.join();
 
-    // 退出码：超时 124；被信号杀死归一（137→124、信号死亡→130）；其余保留真实码。
-    // 语义表单点在 crate::judge。
+    // Exit codes: timeout 124; signal kills normalized (137→124, signal death→130);
+    // others keep the real code.
+    // The canonical semantics table lives in crate::judge.
     let code = if timed_out_now {
         crate::judge::EXIT_TIMEOUT
     } else {
@@ -222,11 +230,12 @@ fn test_once(
     };
     sup.finish();
 
-    // QEMU 自身输出与 guest 串口分离呈现：失败/超时时补看 stderr 尾部
-    // （QEMU 早夭或参数被拒的现场）；成功保持安静。
+    // QEMU's own output and the guest serial are presented separately: on failure/timeout,
+    // show the stderr tail (the scene of an early QEMU death or a rejected argument);
+    // on success, stay quiet.
     pumped.report_tail_on_failure(code);
 
-    // ---- 判定与工件（judge + runs）----
+    // ---- verdict and artifacts (judge + runs) ----
     let meta = runs::RunMeta {
         run_id: run.id.clone(),
         arch: arch.name().to_string(),
@@ -247,9 +256,10 @@ fn test_once(
     let verdict = runs::finalize_run(&run, &meta)?;
     runs::prune(&cfg.project_root, runs::RUNS_KEEP);
 
-    // 退出码对账（冻结契约 0=通过）：QEMU 正常关机恒 exit 0，guest 内失败
-    // 只体现在 verdict（标记协议）——非 passed 折成 1；超时 124 / 中断 130
-    // 原样保留。verdict.json 里的 exit_code 仍是 QEMU 原始码（审计事实）。
+    // Exit code reconciliation (frozen contract 0=pass): QEMU always exits 0 on clean
+    // shutdown; an in-guest failure only shows up in the verdict (marker protocol) —
+    // non-passed folds to 1; timeout 124 / interrupt 130 are kept as-is. exit_code in
+    // verdict.json remains QEMU's raw code (audit fact).
     let code = if code == 0 && verdict != "passed" { 1 } else { code };
 
     match code {
@@ -265,7 +275,7 @@ fn test_once(
     Ok((code, verdict))
 }
 
-/// 构建失败时落盘的 verdict 元数据（build_failed 成档，退出码 1）。
+/// Verdict metadata persisted when the build fails (recorded with build_failed, exit code 1).
 fn build_failed_meta(
     run: &runs::RunDir,
     arch: Arch,

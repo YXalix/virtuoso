@@ -1,10 +1,12 @@
-//! `virtuoso kernel`：容器化内核供给（forge 命令投影）。
+//! `virtuoso kernel`: containerized kernel provisioning (forge command projection).
 //!
-//! 本模块只做配置投影与进程接线：容器工具链工作流（clone/defconfig/build/
-//! shell）+ 卷管理与 current 切换（list/use），逻辑在 forge。产出 = 宿主可见
-//! 内核树（`virtuoso kernel path`），kernel_path 指向它即进入宿主原生测试主
-//! 循环——verdict 管线不感知供给模式。源码编辑走 VS Code devcontainer（容器
-//! 内 clangd 吃 build 产出的 /ksrc 原始形态 compile_commands.json）。
+//! This module only projects config and wires processes: the container toolchain
+//! workflow (clone/defconfig/build/shell) plus volume management and current
+//! switching (list/use); the logic lives in forge. The output is a host-visible
+//! kernel tree (`virtuoso kernel path`); pointing kernel_path at it enters the
+//! host-native test main loop — the verdict pipeline is unaware of the provisioning
+//! mode. Source editing goes through the VS Code devcontainer (in-container clangd
+//! consumes the /ksrc raw-form compile_commands.json produced by build).
 
 use std::path::PathBuf;
 
@@ -40,10 +42,10 @@ pub fn run_kernel(action: KernelAction) -> anyhow::Result<i32> {
     }
 }
 
-// ---------------------------------------------------------------- 投影 helpers
+// ---------------------------------------------------------------- projection helpers
 
-/// 架构解析：CLI --arch > env KERNEL_ARCH > resolve_arch（顶层 arch > 宿主缺省）。
-/// —— 测哪个架构就编哪个架构：缺省与 virtuoso.toml 的 arch 天然一致。
+/// Arch resolution: CLI --arch > env KERNEL_ARCH > resolve_arch (top-level arch > host default).
+/// Build the arch you test: the default naturally matches virtuoso.toml's arch.
 fn kernel_arch(cfg: &Config, cli_arch: Option<&str>) -> anyhow::Result<Arch> {
     if let Some(a) = cli_arch {
         return Arch::parse(a).ok_or_else(|| anyhow::anyhow!("unknown arch {a}"));
@@ -57,7 +59,7 @@ fn kernel_arch(cfg: &Config, cli_arch: Option<&str>) -> anyhow::Result<Arch> {
     resolve_arch(cfg, None)
 }
 
-/// 活动卷解析：env KERNEL_VOLUME > 状态文件 current > 缺省卷。
+/// Active volume resolution: env KERNEL_VOLUME > the current state file > default volume.
 fn current_volume(cfg: &Config) -> anyhow::Result<String> {
     if let Ok(v) = std::env::var("KERNEL_VOLUME") {
         if !v.trim().is_empty() {
@@ -70,13 +72,13 @@ fn current_volume(cfg: &Config) -> anyhow::Result<String> {
     Ok(crate::forge::DEFAULT_VOLUME.to_string())
 }
 
-/// 工具链镜像：env KERNEL_TOOLCHAIN_IMAGE > ghcr 发布镜像（pull 失败回落本地
-/// 构建 devkit/docker/Dockerfile.kernel）。
+/// Toolchain image: env KERNEL_TOOLCHAIN_IMAGE > the ghcr release image (a failed
+/// pull falls back to a local build of devkit/docker/Dockerfile.kernel).
 fn toolchain_image() -> String {
     crate::forge::resolve_image()
 }
 
-/// clone ref：CLI --ref > env KERNEL_REF > 缺省 master。
+/// Clone ref: CLI --ref > env KERNEL_REF > default master.
 fn clone_ref(cli_ref: Option<&str>) -> String {
     cli_ref
         .map(str::to_string)
@@ -92,7 +94,7 @@ fn dockerfile_dir(cfg: &Config) -> PathBuf {
     cfg.project_root.join("devkit").join("docker")
 }
 
-// ---------------------------------------------------------------- 工作流命令
+// ---------------------------------------------------------------- workflow commands
 
 fn run_clone(
     url: &str,
@@ -147,7 +149,7 @@ fn run_defconfig(name: Option<&str>, cli_arch: Option<&str>) -> anyhow::Result<i
     let arch = kernel_arch(&cfg, cli_arch)?;
     let target = name.unwrap_or("defconfig");
     println!(
-        "Kernel: make {target}（volume {volume}，arch {}）",
+        "Kernel: make {target} (volume {volume}, arch {})",
         arch.name()
     );
     crate::forge::run_streaming(
@@ -170,11 +172,12 @@ fn run_build(jobs: Option<usize>, cli_arch: Option<&str>) -> anyhow::Result<i32>
     });
     let image_target = crate::forge::make_image_target(arch);
     println!(
-        "Kernel: make -j{jobs} {image_target} modules + static bpftool（volume {volume}，arch {}）",
+        "Kernel: make -j{jobs} {image_target} modules + static bpftool (volume {volume}, arch {})",
         arch.name()
     );
-    // kernel make 失败即整体失败（|| exit $?）；bpftool 失败只 WARN（见
-    // forge::bpftool_step）——控制面工具不挡内核构建本身。
+    // A kernel make failure fails the whole build (|| exit $?); a bpftool failure only
+    // WARNs (see forge::bpftool_step) — the control-plane tool does not block the
+    // kernel build itself.
     let script = format!(
         "make -j{jobs} {image_target} modules || exit $?\n{}",
         crate::forge::bpftool_step(jobs, arch)
@@ -224,7 +227,7 @@ fn run_shell(cli_arch: Option<&str>) -> anyhow::Result<i32> {
     )
 }
 
-// ---------------------------------------------------------------- 卷管理命令
+// ---------------------------------------------------------------- volume management commands
 
 fn run_list() -> anyhow::Result<i32> {
     let cfg = Config::load()?;
@@ -260,7 +263,8 @@ fn run_use(volume: &str, cli_arch: Option<&str>) -> anyhow::Result<i32> {
         crate::forge::exists(volume),
         "volume {volume} does not exist (see `virtuoso kernel list`, or create it with `virtuoso kernel clone <git-url> --as {volume}`)"
     );
-    // --arch 覆盖记录的架构（KERNEL_ARCH/env/顶层 arch 由 kernel_arch 统一解析）
+    // --arch overrides the recorded arch (KERNEL_ARCH/env/top-level arch are resolved
+    // uniformly by kernel_arch)
     let arch = kernel_arch(&cfg, cli_arch)?;
     crate::forge::write_current(
         &cfg.project_root,

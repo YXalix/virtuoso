@@ -1,10 +1,11 @@
-//! cargo 构建装载共用流水线：`cargo build --release --target <musl triple>`
-//! → 过滤二进制 → 拷贝 + 可执行位。testcases（`/tests/`）与 tools
-//! （tools.img `/bin/`）同走此核心，差异只在目录、标签与降级文案。
+//! Shared cargo build-and-install pipeline: `cargo build --release --target <musl triple>`
+//! → filter binaries → copy + executable bit. testcases (`/tests/`) and
+//! tools (tools.img `/bin/`) share this core; only the directory, label,
+//! and degradation wording differ.
 //!
-//! 降级规则（显式 WARN，不是吞错；构建失败仍 bail）：
-//! - cargo 缺失或 musl target 未随 toolchain 安装 → WARN 跳过（返回 0）；
-//! - 构建成功但无二进制 → bail。
+//! Degradation rules (explicit WARN, not swallowed errors; build failure still bails):
+//! - cargo missing or musl target not installed with the toolchain → WARN and skip (returns 0);
+//! - build succeeds but no binaries → bail.
 
 use std::path::Path;
 
@@ -13,24 +14,24 @@ use anyhow::Context;
 use crate::builder::cross::CrossSetup;
 use crate::util::Progress;
 
-/// 一次装载任务的静态描述。
+/// Static description of one install job.
 pub(crate) struct CargoInstall<'a> {
-    /// 独立 cargo workspace 根（含 Cargo.toml）。
+    /// Root of the standalone cargo workspace (contains Cargo.toml).
     pub rust_dir: &'a Path,
-    /// 产物拷贝目的地（自动创建）。
+    /// Destination for copied artifacts (created automatically).
     pub dest: &'a Path,
     pub triple: &'static str,
     pub cross: &'a CrossSetup,
-    /// 日志/警告中的主题标签（"tools" / "rust testcases"）。
+    /// Subject label in logs/warnings ("tools" / "rust testcases").
     pub label: &'a str,
-    /// 逐二进制进度行前缀（"  Tool:" / "  Test:"）。
+    /// Per-binary progress line prefix ("  Tool:" / "  Test:").
     pub item_prefix: &'a str,
-    /// 二进制名 → 安装子目录（测试组）。None 或未命中 = 平铺进 dest（tools）。
+    /// Binary name → install subdirectory (test groups). None or a miss = flat into dest (tools).
     pub groups: Option<&'a std::collections::HashMap<String, String>>,
 }
 
 impl CargoInstall<'_> {
-    /// 执行构建与装载，返回装入的二进制数。
+    /// Runs the build and install, returning the number of binaries installed.
     pub(crate) fn run(&self, progress: &mut Progress) -> anyhow::Result<usize> {
         if !self.rust_dir.join("Cargo.toml").is_file() {
             return Ok(0);

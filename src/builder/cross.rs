@@ -1,44 +1,50 @@
-//! 交叉编译接线（任意宿主 → guest Linux 静态 ELF）。
+//! Cross-compilation wiring (any host → guest Linux static ELF).
 //!
-//! 单一机制：`zig cc -target <triple>` 包装脚本。zig 自带 musl sysroot 与
-//! lld，任意宿主可产出静态 Linux ELF，一个依赖（`brew install zig` /
-//! 发行版 zig 包）覆盖 C/Rust 两条线（testcases 已全走 cargo，见
-//! testcase.rs）：
-//! - C 测试体：包装脚本经 `CC_<TRIPLE>` 注入 cc crate（用例 crate 的
-//!   build.rs 显式探测该键）；
-//! - Rust 用例 / tools：经 `CARGO_TARGET_<TRIPLE>_LINKER` 注入，zig 接管
-//!   链接时配 `-C link-self-contained=no`（rustc 交出自含 crt1/libc，由
-//!   zig 的 musl sysroot 供给，否则 `_start` 重复定义）。
+//! Single mechanism: a `zig cc -target <triple>` wrapper script. zig ships
+//! its own musl sysroot and lld, so any host can produce static Linux
+//! ELFs; one dependency (`brew install zig` / distro zig package) covers
+//! both the C and Rust lines (testcases are all on cargo now, see
+//! testcase.rs):
+//! - C test bodies: the wrapper script is injected into the cc crate via
+//!   `CC_<TRIPLE>` (the test case crate's build.rs probes that key
+//!   explicitly);
+//! - Rust test cases / tools: injected via `CARGO_TARGET_<TRIPLE>_LINKER`;
+//!   when zig takes over linking it pairs with `-C link-self-contained=no`
+//!   (rustc hands over its self-contained crt1/libc, supplied by zig's
+//!   musl sysroot, otherwise `_start` is defined twice).
 //!
-//! 分平台差异只在链接通道：Linux 宿主不注入 LINKER/rustflags（rustc 自含
-//! musl 链接路径不变，tools 在 Linux CI 零行为变化），但 CC 通道恒尝试
-//! 注入——C 测试体需要 musl 编译器，host gcc 的 glibc 目标码与 musl libc
-//! 混链有 ABI 风险，不允许静默回退（用例 build.rs 对无接管交叉构建
-//! fail-fast；verify 的 host_tools 表把 zig 作为硬前置）。
-//! `CC` / `CARGO_TARGET_*_LINKER` / `CC_<TRIPLE>` 环境变量已设时对应接线
-//! 让位（用户自带工具链优先）。
+//! Per-platform differences live only in the link channel: Linux hosts do
+//! not inject LINKER/rustflags (rustc's self-contained musl link path is
+//! unchanged; tools behave identically on Linux CI), but the CC channel is
+//! always attempted — C test bodies need a musl compiler, and mixing host
+//! gcc glibc object code with musl libc risks ABI breakage, so silent
+//! fallback is not allowed (the test case build.rs fails fast on
+//! cross-builds without the wiring; verify's host_tools table lists zig as
+//! a hard prerequisite).
+//! When `CC` / `CARGO_TARGET_*_LINKER` / `CC_<TRIPLE>` env vars are already
+//! set, the corresponding wiring yields (a user-supplied toolchain wins).
 
 use std::path::Path;
 
 use crate::{Arch, HostOs};
 
-/// 一次构建的交叉接线（值语义；各注入通道独立让位）。
+/// Cross wiring for one build (value semantics; each injection channel yields independently).
 #[derive(Debug, Default)]
 pub(crate) struct CrossSetup {
-    /// C 测试体的 cc crate 编译器注入（key 如 CC_AARCH64_UNKNOWN_LINUX_MUSL）。
+    /// cc crate compiler injection for C test bodies (key like CC_AARCH64_UNKNOWN_LINUX_MUSL).
     pub cc_env: Option<(String, String)>,
-    /// cargo 链接器注入（key 如 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER；
-    /// 仅非 Linux 宿主）。
+    /// cargo linker injection (key like CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER;
+    /// non-Linux hosts only).
     pub cargo_linker: Option<(String, String)>,
-    /// cargo rustflags 注入（key 如 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS；
-    /// 仅非 Linux 宿主，恒配 `-C link-self-contained=no`）。
+    /// cargo rustflags injection (key like CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS;
+    /// non-Linux hosts only, always paired with `-C link-self-contained=no`).
     pub cargo_rustflags: Option<(String, String)>,
-    /// 呈现用说明（progress line / 诊断）。
+    /// Human-facing note (progress line / diagnostics).
     pub note: Option<String>,
 }
 
 impl CrossSetup {
-    /// 把 CC / 链接器 / rustflags 注入应用到 cargo 命令（未接线时为 no-op）。
+    /// Applies the CC / linker / rustflags injections to a cargo command (no-op when unwired).
     pub(crate) fn apply_to_cargo(&self, cmd: &mut std::process::Command) {
         if let Some((k, v)) = &self.cc_env {
             cmd.env(k, v);
@@ -52,10 +58,11 @@ impl CrossSetup {
     }
 }
 
-/// 解析当前宿主的交叉接线。非 Linux 宿主且 zig 缺失 → 显式报错
-/// （fail fast，无 zig 无法产出任何 guest 资产）；Linux 宿主缺 zig 时不
-/// 注入 CC 通道，让 C 测试体在用例 build.rs 拿到明确报错（verify 的
-/// host_tools 表是前置闸门）。
+/// Resolves the cross wiring for the current host. Non-Linux host without
+/// zig → explicit error (fail fast; without zig no guest artifacts can be
+/// produced); a Linux host missing zig skips the CC channel injection so C
+/// test bodies get a clear error from the test case build.rs (verify's
+/// host_tools table is the upstream gate).
 pub(crate) fn setup(arch: Arch, build_dir: &Path) -> anyhow::Result<CrossSetup> {
     let triple = arch.zig_triple().to_string();
     let upper = arch.rust_musl_triple().to_uppercase().replace('-', "_");
@@ -65,36 +72,37 @@ pub(crate) fn setup(arch: Arch, build_dir: &Path) -> anyhow::Result<CrossSetup> 
     let non_linux = HostOs::current() != HostOs::Linux;
 
     if std::env::var_os("CC").is_some() && (!non_linux || std::env::var_os(&linker_key).is_some()) {
-        // 用户自带全套工具链：CC 交 C 测试体（build.rs 自会探测 CC），
-        // 链接交用户 linker
+        // User-supplied full toolchain: CC goes to C test bodies (build.rs
+        // probes CC itself), linking goes to the user linker
         return Ok(CrossSetup {
-            note: Some("cross: CC / 链接器已由环境接管".into()),
+            note: Some("cross: CC / linker taken over by environment".into()),
             ..Default::default()
         });
     }
     let Some(_zig) = crate::util::which_path("zig") else {
         if non_linux {
             anyhow::bail!(
-                "非 Linux 宿主编译 guest 资产需要 zig（brew install zig）\n  \
-                 或自带工具链：CC=<cross-cc> + CARGO_TARGET_{linker_key}=<linker>"
+                "building guest assets on a non-Linux host requires zig (brew install zig)\n  \
+                 or bring your own toolchain: CC=<cross-cc> + CARGO_TARGET_{linker_key}=<linker>"
             );
         }
         return Ok(CrossSetup {
             note: Some(
-                "cross: zig 缺失——C 测试体将在构建期报错（`virtuoso doctor --verbose` 可先行拦截）"
+                "cross: zig missing — C test bodies will error at build time (`virtuoso doctor --verbose` catches this earlier)"
                     .into(),
             ),
             ..Default::default()
         });
     };
-    let _ = _zig; // PATH 命中即可，脚本内按名调用
+    let _ = _zig; // a PATH hit is enough; invoked by name inside the script
 
     let dir = build_dir.join("cross");
     std::fs::create_dir_all(&dir)?;
     let wrapper = dir.join(format!("zig-cc-{}.sh", arch.name()));
-    // -target 追加在 "$@" 之后：clang 驱动后者胜。cc crate 交叉时会透传
-    // rust 风格 --target=<rust triple>（zig 报 UnknownOperatingSystem，
-    // zig 0.16 实测），追加式内嵌 target 把它稳稳盖掉。
+    // -target is appended after "$@": with the clang driver the last one
+    // wins. When crossing, the cc crate passes through a rust-style
+    // --target=<rust triple> (zig reports UnknownOperatingSystem, observed
+    // on zig 0.16); appending the embedded target reliably overrides it.
     std::fs::write(&wrapper, render_wrapper(&triple))?;
     crate::util::set_executable(&wrapper)?;
 
@@ -127,11 +135,13 @@ pub(crate) fn setup(arch: Arch, build_dir: &Path) -> anyhow::Result<CrossSetup> 
     })
 }
 
-/// 渲染 zig cc 包装脚本。rustc 对 aarch64 linux 目标默认追加
-/// `-Wl,--fix-cortex-a53-843419`（Cortex-A53 843419 勘误绕避），zig 的 lld
-/// 不识别、直接报 unsupported linker arg；测试装置不针对 A53 微架构调优，
-/// 逐参过滤即可（POSIX sh 惯用法：for 快照实参表，shift 吃掉头部、
-/// set -- 追回白名单项）。
+/// Renders the zig cc wrapper script. rustc appends
+/// `-Wl,--fix-cortex-a53-843419` by default for aarch64 linux targets (the
+/// Cortex-A53 843419 erratum workaround); zig's lld does not recognize it
+/// and errors with unsupported linker arg. The test harness does not tune
+/// for the A53 microarchitecture, so filtering the flag per-argument is
+/// enough (POSIX sh idiom: `for` snapshots the argument list, `shift`
+/// consumes the head, `set --` re-appends allowlisted items).
 fn render_wrapper(triple: &str) -> String {
     format!(
         "#!/bin/sh\n\
@@ -155,15 +165,15 @@ mod tests {
     fn wrapper_filters_erratum_flag_and_appends_target() {
         let s = render_wrapper("aarch64-linux-musl");
         assert!(s.starts_with("#!/bin/sh"));
-        // 勘误参数被白名单过滤（rustc stable 1.98 起对 aarch64 显式透传）
+        // The erratum flag is filtered by the allowlist (rustc stable 1.98+ passes it explicitly for aarch64)
         assert!(s.contains("-Wl,--fix-cortex-a53-843419) ;;"));
-        // -target 仍追加在 "$@" 之后（盖掉 cc crate 透传的 rust triple）
+        // -target is still appended after "$@" (overrides the rust triple passed through by the cc crate)
         assert!(s.ends_with("exec zig cc \"$@\" -target aarch64-linux-musl\n"));
     }
 
     #[test]
     fn env_key_shape() {
-        // 与 setup() 内拼接规则互为镜像，防拼写漂移
+        // Mirrors the concatenation rule in setup(), guarding against spelling drift
         let upper = Arch::Arm64
             .rust_musl_triple()
             .to_uppercase()
@@ -177,9 +187,11 @@ mod tests {
 
     #[test]
     fn linux_host_has_no_linker_injection() {
-        // 本测试恒在 Linux 跑（CI 与开发机均为 Linux）；Darwin 分支由
-        // 真机验收覆盖。Linux 宿主链接通道恒空（rustc 自含 musl），CC
-        // 通道取决于 zig 是否在 PATH，不在此断言。
+        // This test always runs on Linux (both CI and dev machines are
+        // Linux); the Darwin branch is covered by acceptance on real
+        // hardware. The Linux host link channel is always empty (rustc is
+        // self-contained musl); the CC channel depends on whether zig is on
+        // PATH and is not asserted here.
         if HostOs::current() == HostOs::Linux {
             let s = setup(Arch::Arm64, Path::new("/tmp")).unwrap();
             assert!(s.cargo_linker.is_none());

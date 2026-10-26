@@ -1,5 +1,6 @@
-# 全仓固定 stable（含 infra/testcases、infra/tools 子目录，rustup 按目录向上解析）。
-# 项目不依赖 nightly：用例框架为 std + musl 静态，交叉接线由 builder::cross 注入，
-# musl 目标用 `rustup target add <triple>` 供给（见 infra/*/.cargo/config.toml 注释）。
+# Pin the whole repo to stable (including the infra/testcases and infra/tools subdirectories;
+# rustup resolves upward per directory). The project does not depend on nightly: the test case
+# framework is std + musl static, cross-compilation wiring is injected by builder::cross, and the
+# musl target is provisioned via `rustup target add <triple>` (see the comments in infra/*/.cargo/config.toml).
 [toolchain]
 channel = "stable"

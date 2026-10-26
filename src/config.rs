@@ -1,14 +1,19 @@
-//! 类型化配置层。`virtuoso.toml` 是唯一配置面 —— 结构化全局键 +
-//! 组件化（每个 `[components.*]` 段是一个 VM 组件，`require` 声明其依赖的
-//! 内核模块，builder 按启用组件的并集生成模块清单；`[tests]` 段收测例
-//! 套件的模块依赖）。非法配置一律解析期报错（未知键、非法类型）。
+//! Typed configuration layer. `virtuoso.toml` is the single configuration
+//! surface — structured global keys plus components (each `[components.*]`
+//! section is a VM component whose `require` declares the kernel modules it
+//! depends on; the builder generates the module manifest from the union of
+//! enabled components, and the `[tests]` section collects module dependencies
+//! of the test-case suite). Invalid configuration always errors at parse time
+//! (unknown keys, invalid types).
 //!
-//! 标量键取值优先级：**进程环境变量 > virtuoso.toml** —— 同名键环境变量
-//! 覆盖 toml 字段（CI/命令行临时改参不动文件），都未设置时用内置缺省。
+//! Scalar key priority: **process environment variables > virtuoso.toml** —
+//! an env var overrides the same-named toml field (CI/CLI temporary overrides
+//! never touch the file); when neither is set, built-in defaults apply.
 //!
-//! 分节：标量取值链与 Config → 全局标量访问器 → 组件访问器 → BusyBox
-//! 供给 → ComponentPlan（require 并集）→ toml schema（结构真相，未知键/
-//! 非法类型解析期报错的唯一防线）。
+//! Sections: scalar resolution chain and Config → global scalar accessors →
+//! component accessors → BusyBox provisioning → ComponentPlan (require
+//! union) → toml schema (structural truth, the sole line of defense rejecting
+//! unknown keys/invalid types at parse time).
 
 use std::path::{Path, PathBuf};
 
@@ -18,9 +23,10 @@ use crate::Arch;
 
 use crate::builder::busybox;
 
-// ---------------------------------------------------------------- 标量取值链与 Config
+// ---------------------------------------------------------------- Scalar resolution chain and Config
 
-/// 项目根定位：从当前目录逐级向上寻找含 `infra/init`（PID 1 脚本）的目录。
+/// Project root discovery: walk up from the current directory looking for a
+/// directory containing `infra/init` (the PID 1 script).
 pub fn find_project_root() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
@@ -33,8 +39,10 @@ pub fn find_project_root() -> Option<PathBuf> {
     }
 }
 
-/// 标量取值链：进程环境变量 > virtuoso.toml 字段（同名键 env 覆盖 toml；
-/// 空串视为未设置，继续回落）。无文件编辑的临时改参走 env，持久配置写 toml。
+/// Scalar resolution chain: process env var > virtuoso.toml field (env
+/// overrides toml for same-named keys; an empty string counts as unset and
+/// resolution falls through). Temporary overrides without file edits go
+/// through env; persistent configuration is written to toml.
 fn scalar(toml_val: Option<&StrVal>, env_key: &str) -> Option<String> {
     if let Ok(v) = std::env::var(env_key) {
         if !v.trim().is_empty() {
@@ -49,7 +57,7 @@ fn scalar(toml_val: Option<&StrVal>, env_key: &str) -> Option<String> {
     None
 }
 
-/// env 布尔解析（宽松语义："1"/"true"/"yes"/"on" 为真，其余为假）。
+/// Env bool parsing (lenient semantics: "1"/"true"/"yes"/"on" is true, everything else false).
 fn env_bool(key: &str) -> Option<bool> {
     std::env::var(key).ok().map(|v| {
         matches!(
@@ -61,18 +69,19 @@ fn env_bool(key: &str) -> Option<bool> {
 
 pub struct Config {
     pub project_root: PathBuf,
-    /// VM 内源资产（init、modules-boot.conf、testcases、tools）——git 跟踪。
+    /// In-VM source assets (init, modules-boot.conf, testcases, tools) — git tracked.
     pub infra_dir: PathBuf,
-    /// 工作区 target/（运行 scratch：agent shell socket 等）。
+    /// Workspace target/ (run scratch: agent shell socket etc.).
     pub target_dir: PathBuf,
-    /// 构建产物（initrd.img / rootfs.img / tools.img）——数据面，git 忽略。
+    /// Build artifacts (initrd.img / rootfs.img / tools.img) — data plane, git ignored.
     pub artifacts_dir: PathBuf,
-    /// 构建暂存与缓存（busybox 供给链、initramfs/rootfs 组装目录）——git 忽略。
+    /// Build staging and cache (busybox supply chain, initramfs/rootfs
+    /// assembly dirs) — git ignored.
     pub build_dir: PathBuf,
-    /// virtuoso.toml 路径（存在才 Some）。
+    /// Path to virtuoso.toml (Some only when it exists).
     pub toml_path: Option<PathBuf>,
-    /// virtuoso.toml 类型化解析结果（文件存在才 Some；未知键/非法类型已在
-    /// 解析期报错）。
+    /// Typed parse result of virtuoso.toml (Some only when the file exists;
+    /// unknown keys/invalid types already error at parse time).
     pub toml: Option<VirtuosoToml>,
 }
 
@@ -102,17 +111,19 @@ impl Config {
         })
     }
 
-    /// virtuoso.toml 路径（存在才 Some）。
+    /// Path to virtuoso.toml (Some only when it exists).
     pub fn toml_path(&self) -> Option<&Path> {
         self.toml_path.as_deref()
     }
 
-    /// 取 toml 全局标量字段（None 当字段未写或 toml 文件不存在）。
+    /// Read a toml global scalar field (None when the field is absent or the
+    /// toml file does not exist).
     fn tv(&self, f: impl FnOnce(&VirtuosoToml) -> &Option<StrVal>) -> Option<&StrVal> {
         self.toml.as_ref().and_then(|t| f(t).as_ref())
     }
 
-    /// 组件段访问入口（toml 未配置 / components 段缺失 = None）。
+    /// Component section access (None when toml is absent or the components
+    /// section is missing).
     fn comp<'a, T>(
         &'a self,
         f: impl FnOnce(&'a ComponentsSection) -> Option<&'a T>,
@@ -121,18 +132,19 @@ impl Config {
     }
 }
 
-// ---------------------------------------------------------------- 全局标量访问器
+// ---------------------------------------------------------------- Global scalar accessors
 
-/// 内核源码树的解析来源（诊断如实呈现 + skill install 显式性判断）。
+/// Where the kernel source tree resolved from (honest diagnostics + the
+/// explicitness check for skill install).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelPathSource {
-    /// 进程环境 KERNEL_PATH（CI / 临时改参，恒最高——冻结不变量 5）
+    /// Process env KERNEL_PATH (CI / temporary overrides; always highest — frozen invariant 5)
     Env,
-    /// docker 模式活动卷（KERNEL_VOLUME env > current 状态文件 → 卷宿主视图）
+    /// Docker-mode active volume (KERNEL_VOLUME env > current state file → volume host view)
     CurrentVolume(String),
-    /// virtuoso.toml kernel_path（raw 模式显式指定）
+    /// virtuoso.toml kernel_path (explicit in raw mode)
     Config,
-    /// 缺省自动探测 = 项目根上一级
+    /// Default auto-detection = parent of the project root
     AutoDetect,
 }
 
@@ -147,12 +159,15 @@ impl std::fmt::Display for KernelPathSource {
     }
 }
 
-/// 内核源码树解析（唯一入口，doctor/builder/skill/launcher 全走这里）：
-/// 进程环境 KERNEL_PATH > docker 活动卷 > toml kernel_path > 缺省项目根
-/// 上一级。活动卷压过 toml——`kernel use/clone` 是用户最近一次"我在哪棵
-/// 树上干活"的明确表态，切卷后 test 仍吃旧树正是 dual-source 困扰的根源；
-/// env 恒最高（同名标量键环境变量优先，冻结不变量 5）。视图解析经 view_of
-/// 注入（生产 = forge::host_view，测试 = 假实现）。
+/// Kernel source tree resolution (the single entry point; doctor/builder/
+/// skill/launcher all go through here): process env KERNEL_PATH > docker
+/// active volume > toml kernel_path > default parent of the project root.
+/// The active volume overrides toml — `kernel use/clone` is the user's most
+/// recent explicit statement of "which tree I am working on"; test still
+/// consuming the old tree after a volume switch is exactly the root of
+/// dual-source confusion. env is always highest (env vars win for same-named
+/// scalar keys, frozen invariant 5). View resolution is injected via view_of
+/// (production = forge::host_view, tests = a fake).
 fn resolve_kernel_path(
     project_root: &Path,
     toml_val: Option<&str>,
@@ -185,21 +200,23 @@ fn resolve_kernel_path(
 }
 
 impl Config {
-    /// 解析目标架构；无法解析时返回 None（诊断层告警）。
+    /// Resolve the target arch; returns None when unresolvable (the
+    /// diagnostics layer warns).
     pub fn arch(&self) -> Option<Arch> {
         self.arch_str()
             .and_then(|a| Arch::parse(&a))
             .or_else(Arch::host_default)
     }
 
-    /// arch 原始字符串（诊断层呈现来源用）。
+    /// Raw arch string (for the diagnostics layer to show the source).
     pub fn arch_str(&self) -> Option<String> {
         scalar(self.tv(|t| &t.arch), "ARCH")
     }
 
-    /// 内核源码树解析：进程环境 KERNEL_PATH > docker 活动卷 > toml
-    /// kernel_path > 缺省项目根上一级。来源随路径一并返回（诊断呈现 +
-    /// 显式性判断），解析规则见 [`resolve_kernel_path`]。
+    /// Kernel source tree resolution: process env KERNEL_PATH > docker
+    /// active volume > toml kernel_path > default parent of the project
+    /// root. The source is returned alongside the path (diagnostics display
+    /// + explicitness check); see [`resolve_kernel_path`] for the rules.
     pub fn kernel_path(&self) -> anyhow::Result<(PathBuf, KernelPathSource)> {
         resolve_kernel_path(
             &self.project_root,
@@ -208,39 +225,43 @@ impl Config {
         )
     }
 
-    /// kernel_image 覆盖（缺省 = 内核树内 arch 对应镜像）。
+    /// kernel_image override (default = the arch's image inside the kernel tree).
     pub fn kernel_image(&self) -> Option<String> {
         scalar(self.tv(|t| &t.kernel_image), "KERNEL_IMAGE")
     }
 
-    /// QEMU_TIMEOUT 原始字符串（"0" 由 test 命令拒绝）。
+    /// Raw QEMU_TIMEOUT string ("0" is rejected by the test command).
     pub fn timeout_raw(&self) -> String {
         scalar(self.tv(|t| &t.timeout_secs), "QEMU_TIMEOUT").unwrap_or_else(|| "0".into())
     }
 
-    /// AUTO_TEST 开关（缺省 true —— 常规启动即跑测试；env 覆盖 toml，
-    /// env_bool 宽松语义：1/true/yes/on 为真）。
+    /// AUTO_TEST switch (default true — a normal boot runs the tests; env
+    /// overrides toml, env_bool lenient semantics: 1/true/yes/on is true).
     pub fn auto_test(&self) -> bool {
         env_bool("AUTO_TEST")
             .unwrap_or_else(|| self.toml.as_ref().and_then(|t| t.auto_test).unwrap_or(true))
     }
 
-    /// QEMU 二进制覆盖。
+    /// QEMU binary override.
     pub fn qemu_override(&self) -> Option<String> {
         scalar(self.tv(|t| &t.qemu), "QEMU")
     }
 
-    /// 内核 cmdline 追加段：`CMDLINE_EXTRA` 环境变量优先，否则 toml
-    /// `cmdline_extra`。原样整串追加在机器拼装基线之后（空缺省 = argv 与
-    /// 冻结基线逐字一致）；内核参数 last-wins，追加即覆盖（`console=`
-    /// 例外：注册为第二控制台，后者成为 preferred）。
+    /// Kernel cmdline extra: `CMDLINE_EXTRA` env var first, else toml
+    /// `cmdline_extra`. Appended verbatim as one string after the
+    /// machine-assembled baseline (empty default = argv identical word for
+    /// word to the frozen baseline); kernel params are last-wins, so
+    /// appending overrides (the `console=` exception: registered as a second
+    /// console, the later one becomes preferred).
     pub fn cmdline_extra(&self) -> Option<String> {
         scalar(self.tv(|t| &t.cmdline_extra), "CMDLINE_EXTRA")
     }
 
-    /// QEMU 透传参数（全局兜底）：`QEMU_OPTS` 环境变量（空白切分）优先，
-    /// 否则 toml `qemu_opts` 数组。组件增量（vfio 设备等）不在此混入——
-    /// 由装配点（cli::build_invocation）显式追加，全局兜底与组件增量分清。
+    /// QEMU passthrough args (global fallback): `QEMU_OPTS` env var (split
+    /// on whitespace) first, else the toml `qemu_opts` array. Component
+    /// increments (vfio devices etc.) are not mixed in here — they are
+    /// appended explicitly at the assembly point (cli::build_invocation),
+    /// keeping the global fallback and component increments separate.
     pub fn qemu_extra(&self) -> Vec<String> {
         match std::env::var("QEMU_OPTS") {
             Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(str::to_string).collect(),
@@ -254,10 +275,10 @@ impl Config {
     }
 }
 
-// ---------------------------------------------------------------- 组件访问器
+// ---------------------------------------------------------------- Component accessors
 
 impl Config {
-    /// vfio 直通设备 BDF 列表（组件未启用 = 空）。
+    /// vfio passthrough device BDF list (empty when the component is disabled).
     pub fn vfio(&self) -> Option<&[String]> {
         let v = self.comp(|c| c.vfio.as_ref())?;
         v.enabled
@@ -265,9 +286,9 @@ impl Config {
             .then(|| v.devices.as_deref().unwrap_or(&[]))
     }
 
-    /// vfio 组件：每设备一条 `-device vfio-pci,host=<bdf>`。
-    /// 组件增量由装配点（cli::build_invocation）显式追加，不参与
-    /// qemu_opts 的 env/toml 优先级链。
+    /// vfio component: one `-device vfio-pci,host=<bdf>` per device.
+    /// Component increments are appended explicitly at the assembly point
+    /// (cli::build_invocation) and bypass the qemu_opts env/toml priority chain.
     pub fn vfio_opts(&self) -> Vec<String> {
         match self.vfio() {
             Some(devices) if !devices.is_empty() => devices
@@ -278,15 +299,16 @@ impl Config {
         }
     }
 
-    /// NUMA 拓扑参数 (smp, nodes, memory_per_node)，供 NumaTopology::parse。
-    /// 组件化取值：smp 全局；nodes/memory 来自启用的 [components.numa]，
-    /// 未启用（缺省单节点）回落遗留变量，再回落 1 / "1G"。
+    /// NUMA topology params (smp, nodes, memory_per_node) for
+    /// NumaTopology::parse. Componentized resolution: smp is global;
+    /// nodes/memory come from the enabled [components.numa], falling back to
+    /// the legacy vars when disabled (default single node), then to 1 / "1G".
     pub fn topo_params(&self) -> (String, String, String) {
         let smp = scalar(self.tv(|t| &t.smp), "SMP").unwrap_or_else(|| "8".into());
         let numa = self
             .comp(|c| c.numa.as_ref())
             .filter(|n| n.enabled.unwrap_or(false));
-        // 优先级冻结：NUMA_NODES / NUMA_MEMORY env 覆盖 toml（组件启用与否皆然）
+        // Priority frozen: NUMA_NODES / NUMA_MEMORY env override toml (whether or not the component is enabled)
         let nodes = match &numa {
             Some(n) => scalar(n.nodes.as_ref(), "NUMA_NODES").unwrap_or_else(|| "2".into()),
             None => std::env::var("NUMA_NODES")
@@ -306,10 +328,11 @@ impl Config {
         (smp, nodes, mem)
     }
 
-    /// 组件计划：启用组件的 require 并集（按 schema 固定顺序
-    /// tools_disk → agent → vfio → numa → pmem → bpf，去重保首个），按 stage 分区。
-    /// `[tests]` 段的 require 最后并入（恒 runtime；同名模块组件条目优先，
-    /// 测例只补差集）。
+    /// Component plan: the require union of enabled components (schema-fixed
+    /// order tools_disk → agent → vfio → numa → pmem → bpf, dedup keeping
+    /// the first), partitioned by stage. The `[tests]` section's require is
+    /// merged last (always runtime; same-named module component entries win,
+    /// test cases only fill the difference).
     pub fn component_plan(&self) -> ComponentPlan {
         let mut plan = ComponentPlan::default();
         if let Some(c) = self.comp(|c| c.tools_disk.as_ref()) {
@@ -336,31 +359,34 @@ impl Config {
         plan
     }
 
-    /// tools_disk 组件是否启用（段缺省 = true：tools.img 存在即附加，
-    /// 与冻结不变量 3 的「调用方增量」语义一致）。
+    /// Whether the tools_disk component is enabled (section default = true:
+    /// attach tools.img whenever it exists, matching the "caller increments"
+    /// semantics of frozen invariant 3).
     pub fn tools_disk_enabled(&self) -> bool {
         self.comp(|c| c.tools_disk.as_ref())
             .and_then(|c| c.enabled)
             .unwrap_or(true)
     }
 
-    /// agent 组件是否启用（段缺省 = false：argv 保持冻结基线）。
+    /// Whether the agent component is enabled (section default = false: argv keeps the frozen baseline).
     pub fn agent_enabled(&self) -> bool {
         self.comp(|c| c.agent.as_ref())
             .and_then(|c| c.enabled)
             .unwrap_or(false)
     }
 
-    /// bpf 观测组件（bpftrace 随 tools 盘供给）是否启用。
-    /// 段缺省 = false：纯构建侧开关，QEMU argv 与冻结基线无关。
+    /// Whether the bpf observability component is enabled (bpftrace is
+    /// provisioned on the tools disk). Section default = false: a pure
+    /// build-side switch, QEMU argv stays unrelated to the frozen baseline.
     pub fn bpf_enabled(&self) -> bool {
         self.comp(|c| c.bpf.as_ref())
             .and_then(|c| c.enabled)
             .unwrap_or(false)
     }
 
-    /// pmem 组件 size（启用才 Some；未写 size 用缺省 "256M"）。
-    /// 段缺省（或 enabled=false）= 关闭：argv 保持冻结基线。
+    /// pmem component size (Some only when enabled; missing size uses the
+    /// default "256M"). Section default (or enabled=false) = off: argv keeps
+    /// the frozen baseline.
     pub fn pmem_size(&self) -> Option<String> {
         self.comp(|c| c.pmem.as_ref())
             .filter(|p| p.enabled.unwrap_or(false))
@@ -373,10 +399,11 @@ impl Config {
     }
 }
 
-// ---------------------------------------------------------------- BusyBox 供给配置
+// ---------------------------------------------------------------- BusyBox provisioning config
 
 impl Config {
-    /// BusyBox 供给配置（BUSYBOX_* 变量优先，回落 toml [busybox] 段）。
+    /// BusyBox provisioning config (BUSYBOX_* vars first, falling back to
+    /// the toml [busybox] section).
     pub fn busybox_supply(&self) -> busybox::Supply {
         let toml = self.toml.as_ref().and_then(|t| t.busybox.as_ref());
         busybox::Supply {
@@ -392,11 +419,13 @@ impl Config {
 
 // ---------------------------------------------------------------- ComponentPlan
 
-/// 启用组件的 KO 依赖并集：`boot_extra` 追加在 modules-boot.conf 冻结
-/// 基础集之后（initramfs 阶段加载），`runtime` 生成 rootfs 的
-/// /lib/modules/modules.conf（switch_root 后加载）。条目 = conf 行
-/// `"<module> [key=val ...]"`，首 token 是模块名（去重键）。
-/// builder 消费该计划生成 initramfs 基础集追加与 rootfs modules.conf。
+/// The KO dependency union of enabled components: `boot_extra` is appended
+/// after the modules-boot.conf frozen base set (loaded at the initramfs
+/// stage), `runtime` generates the rootfs /lib/modules/modules.conf (loaded
+/// after switch_root). An entry = a conf line `"<module> [key=val ...]"`;
+/// the first token is the module name (the dedup key). The builder consumes
+/// this plan to produce the initramfs base-set additions and the rootfs
+/// modules.conf.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ComponentPlan {
     pub boot_extra: Vec<String>,
@@ -428,7 +457,7 @@ impl ComponentPlan {
         }
     }
 
-    /// 全部条目（boot_extra 在前）—— verify 的模块存在性检查输入。
+    /// All entries (boot_extra first) — input for verify's module existence check.
     pub fn all(&self) -> impl Iterator<Item = &String> {
         self.boot_extra.iter().chain(self.runtime.iter())
     }
@@ -436,13 +465,15 @@ impl ComponentPlan {
 
 // ---------------------------------------------------------------- toml schema
 
-// toml schema：`virtuoso.toml` 的类型化结构与解析（`Config`
-// 只做访问器，结构真相在这里）。未知键（`deny_unknown_fields`）与非法类型
-// 一律解析期报错；`StrVal` 统一收编 string/int 标量，`Stage` 区分 KO 的
-// boot/runtime 加载阶段。
+// toml schema: typed structure and parsing of `virtuoso.toml` (`Config`
+// only holds accessors; structural truth lives here). Unknown keys
+// (`deny_unknown_fields`) and invalid types always error at parse time;
+// `StrVal` uniformly accepts string/int scalars, `Stage` distinguishes the
+// boot/runtime KO load stages.
 
-/// 接受 string 或 integer 标量并统一成 String（timeout_secs = 60 与 = "60"
-/// 等价）。其余类型（bool/array…）在解析期报错。
+/// Accepts a string or integer scalar and unifies it into a String
+/// (timeout_secs = 60 and = "60" are equivalent). Other types
+/// (bool/array...) error at parse time.
 #[derive(Debug, Clone)]
 pub(crate) struct StrVal(pub(crate) String);
 
@@ -452,7 +483,7 @@ impl<'de> serde::Deserialize<'de> for StrVal {
         impl serde::de::Visitor<'_> for V {
             type Value = StrVal;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("字符串或整数")
+                f.write_str("string or integer")
             }
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<StrVal, E> {
                 Ok(StrVal(v.to_string()))
@@ -468,8 +499,9 @@ impl<'de> serde::Deserialize<'de> for StrVal {
     }
 }
 
-/// 组件 KO 的加载阶段：`boot` = 并入 initramfs（挂 root 前就要），
-/// `runtime`（缺省）= switch_root 后由 rootfs init 加载。
+/// KO load stage for a component: `boot` = merged into the initramfs (needed
+/// before mounting root), `runtime` (default) = loaded by the rootfs init
+/// after switch_root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage {
     Boot,
@@ -517,26 +549,31 @@ pub(crate) struct ComponentsSection {
     pub(crate) bpf: Option<BpfComponent>,
 }
 
-// 组件公共字段（enabled / require / stage）逐结构体显式声明 —— 不用
-// #[serde(flatten)]，它与 deny_unknown_fields 不兼容（未知键会漏过）。
+// Component common fields (enabled / require / stage) are declared explicitly
+// per struct — no #[serde(flatten)], which is incompatible with
+// deny_unknown_fields (unknown keys would slip through).
 
-/// 组件公共字段的统一视图：启用判定与 require 并集只看这三个面，
-/// 各组件结构体逐项实现（五行样板换掉调用方的五行复制块）。
+/// Unified view of the component common fields: enabled determination and
+/// the require union look only at these three facets; each component struct
+/// implements them item by item (five lines of boilerplate replace the
+/// caller's five-line copy blocks).
 pub(crate) trait Component {
     fn enabled(&self) -> Option<bool>;
     fn stage(&self) -> Option<Stage>;
     fn require(&self) -> &Option<Vec<String>>;
 }
 
-/// 启用组件的 require 并入计划（禁用组件整体跳过）。
+/// Merge an enabled component's require into the plan (disabled components
+/// are skipped entirely).
 pub(crate) fn push_enabled(plan: &mut ComponentPlan, c: &impl Component) {
     if c.enabled().unwrap_or(false) {
         plan.push(c.stage(), c.require());
     }
 }
 
-/// tools.img 常驻工具盘（外挂 virtio-blk → /dev/vdb 挂 /tools）。
-/// 段缺省即启用；require 默认为空（virtio_blk/ext4 已在 boot 基础集）。
+/// Persistent tools disk as tools.img (attached virtio-blk → /dev/vdb
+/// mounted at /tools). Section default is enabled; require defaults to empty
+/// (virtio_blk/ext4 are already in the boot base set).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ToolsDiskComponent {
@@ -557,8 +594,8 @@ impl Component for ToolsDiskComponent {
     }
 }
 
-/// AI probe 通道（virtio-serial + guest 内 virtuoso-agent）。
-/// 段缺省即关闭 —— argv 保持冻结基线（不变量 3）。
+/// AI probe channel (virtio-serial + the in-guest virtuoso-agent).
+/// Section default is off — argv keeps the frozen baseline (invariant 3).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentComponent {
@@ -579,8 +616,8 @@ impl Component for AgentComponent {
     }
 }
 
-/// vfio-pci 直通：devices = 宿主设备 BDF 列表，逐条生成
-/// `-device vfio-pci,host=<bdf>`。
+/// vfio-pci passthrough: devices = a list of host device BDFs, generating
+/// one `-device vfio-pci,host=<bdf>` each.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VfioComponent {
@@ -602,7 +639,7 @@ impl Component for VfioComponent {
     }
 }
 
-/// 多节点 NUMA 拓扑；段缺省（或 enabled=false）= 单节点。
+/// Multi-node NUMA topology; section default (or enabled=false) = single node.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NumaComponent {
@@ -625,9 +662,10 @@ impl Component for NumaComponent {
     }
 }
 
-/// 持久内存（QEMU nvdimm → guest /dev/pmem0）；段缺省 = 关闭（argv 保持
-/// 冻结基线）。size = 后端文件大小（缺省 "256M"）；require 按被测内核
-/// 配置取舍（如 libnvdimm/nfit/nd_pmem 为 =m 时声明）。
+/// Persistent memory (QEMU nvdimm → guest /dev/pmem0); section default =
+/// off (argv keeps the frozen baseline). size = backend file size (default
+/// "256M"); require depends on the kernel under test's configuration
+/// (declare when e.g. libnvdimm/nfit/nd_pmem are built as =m).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PmemComponent {
@@ -649,10 +687,11 @@ impl Component for PmemComponent {
     }
 }
 
-/// bpf 观测组件：bpftrace（官方 Release AppImage）随 tools 盘供给。
-/// 段缺省 = 关闭；纯构建侧开关 —— QEMU argv 与冻结基线无关，运行时
-/// 以 `/tools/bin/bpftrace` 直跑（内核侧要求 BPF/BTF，openEuler defconfig
-/// 缺省即开）。
+/// bpf observability component: bpftrace (the official release AppImage) is
+/// provisioned on the tools disk. Section default = off; a pure build-side
+/// switch — QEMU argv stays unrelated to the frozen baseline; at runtime it
+/// runs directly as `/tools/bin/bpftrace` (kernel side requires BPF/BTF,
+/// on by default in the openEuler defconfig).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BpfComponent {
@@ -681,10 +720,13 @@ pub(crate) struct BusyboxSection {
     pub(crate) dl_url: Option<StrVal>,
 }
 
-/// `[tests]` 段：测例套件的 KO 依赖——给内核特性写测例时，被测模块
-/// （`=m` 形态）声明的自然归属，不必挂到无关组件上。条目格式与组件
-/// `require` 一致（conf 行），恒 runtime 阶段（测例都在 pivot 后跑）；
-/// 并入计划时排在五个组件之后 = 同名模块组件条目优先，这里只补差集。
+/// The `[tests]` section: KO dependencies of the test-case suite — the
+/// natural home for declaring modules under test (built as `=m`) when
+/// writing test cases for a kernel feature, without hanging them on
+/// unrelated components. Entries follow the component `require` format
+/// (conf lines), always at the runtime stage (test cases all run after
+/// pivot); merged after the five components in the plan = same-named module
+/// component entries win, this only fills the difference.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TestsSection {
@@ -703,7 +745,7 @@ pub(crate) fn parse_toml(path: &Path) -> anyhow::Result<VirtuosoToml> {
     })
 }
 
-// ---------------------------------------------------------------- 测试
+// ---------------------------------------------------------------- Tests
 
 #[cfg(test)]
 mod tests {
@@ -715,8 +757,9 @@ mod tests {
 
     #[test]
     fn scalar_env_overrides_toml() {
-        // 优先级冻结：进程环境变量 > virtuoso.toml。env 改动是进程全局的，
-        // 用互斥锁串行化，键名用专用前缀避免污染真实配置键。
+        // Priority frozen: process env var > virtuoso.toml. env changes are
+        // process-global; serialize with a mutex and use a dedicated key
+        // prefix to avoid polluting real config keys.
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap();
         let toml = StrVal("arm64".into());
@@ -724,15 +767,15 @@ mod tests {
         assert_eq!(
             scalar(Some(&toml), "VIRTUOSO_TEST_SCALAR").as_deref(),
             Some("riscv64"),
-            "同名键进程环境变量必须覆盖 toml"
+            "same-named process env var must override toml"
         );
         std::env::remove_var("VIRTUOSO_TEST_SCALAR");
         assert_eq!(
             scalar(Some(&toml), "VIRTUOSO_TEST_SCALAR").as_deref(),
             Some("arm64"),
-            "env 未设置时回落 toml"
+            "falls back to toml when env is unset"
         );
-        // 空串视为未设置：env 与 toml 的空值都继续回落
+        // Empty string counts as unset: both env and toml empty values fall through
         std::env::set_var("VIRTUOSO_TEST_SCALAR", "");
         assert_eq!(
             scalar(Some(&toml), "VIRTUOSO_TEST_SCALAR").as_deref(),
@@ -804,8 +847,9 @@ memory_per_node = "1G"
 
     #[test]
     fn component_plan_unions_enabled_requires_in_schema_order() {
-        // 顺序冻结：tools_disk → agent → vfio → numa → pmem；去重保首个；
-        // 禁用组件的 require 不并入；stage=boot 分区到 boot_extra。
+        // Order frozen: tools_disk → agent → vfio → numa → pmem; dedup keeps
+        // the first; a disabled component's require is not merged;
+        // stage=boot partitions into boot_extra.
         let cfg = parse(
             r#"
 [components.tools_disk]
@@ -834,15 +878,16 @@ require = ["nd_pmem"]
         .unwrap();
         let comps = cfg.components.as_ref().unwrap();
         let mut plan = ComponentPlan::default();
-        // 直接复用 Config::component_plan 的拼装逻辑太重（要全量 Config），
-        // 这里镜像其调用顺序验证 push 语义。
+        // Reusing Config::component_plan's assembly logic directly is too
+        // heavy (it needs a full Config); mirror its call order to verify
+        // push semantics.
         let td = comps.tools_disk.as_ref().unwrap();
         let ag = comps.agent.as_ref().unwrap();
         let nm = comps.numa.as_ref().unwrap();
         let pm = comps.pmem.as_ref().unwrap();
         plan.push(td.stage, &td.require);
         plan.push(ag.stage, &ag.require);
-        // vfio disabled —— require 不并入
+        // vfio disabled — require not merged
         plan.push(nm.stage, &nm.require);
         plan.push(pm.stage, &pm.require);
         assert_eq!(plan.runtime, ["virtio_blk", "virtio_console", "nd_pmem"]);
@@ -855,7 +900,7 @@ require = ["nd_pmem"]
 
     #[test]
     fn pmem_parses_with_size_and_defaults_disabled() {
-        // 段缺省 = 关闭：size 访问器返回 None
+        // Section default = off: the size accessor returns None
         let cfg = parse("[components.pmem]\n").unwrap();
         let comps = cfg.components.as_ref().unwrap();
         assert!(comps.pmem.as_ref().unwrap().enabled.is_none());
@@ -885,7 +930,7 @@ require = ["libnvdimm", "nfit", "nd_pmem"]
 
     #[test]
     fn bpf_component_defaults_off_and_parses_enabled() {
-        // 段缺省 = 无段；空段/未写 enabled = 关闭
+        // Section default = no section; empty section/missing enabled = off
         let cfg = parse("[components.bpf]\n").unwrap();
         let bpf = cfg.components.as_ref().unwrap().bpf.as_ref().unwrap();
         assert!(bpf.enabled.is_none());
@@ -920,7 +965,8 @@ require = ["bpf"]
             cfg.tests.as_ref().unwrap().require.clone().unwrap(),
             vec!["overlay", "kvm"]
         );
-        // 测例套件没有开关语义（auto_test 是全局键）：enabled 必须报错
+        // The test-case suite has no on/off semantics (auto_test is a global
+        // key): enabled must error
         assert!(parse("[tests]\nenabled = true\n").is_err());
         assert!(parse("[tests]\nstage = \"boot\"\n").is_err());
     }
@@ -929,7 +975,7 @@ require = ["bpf"]
     fn unknown_key_is_rejected_at_parse_time() {
         assert!(
             parse("arch = \"arm64\"\nshmp = 4\n").is_err(),
-            "拼写错误的键必须在解析期报错"
+            "misspelled keys must error at parse time"
         );
     }
 
@@ -954,15 +1000,15 @@ require = ["bpf"]
         );
         assert_eq!(plan.runtime, ["nvme-core poll_queues=2".to_string()]);
         plan.push(Some(Stage::Boot), &Some(vec!["nvme-core".into()]));
-        assert_eq!(plan.boot_extra, ["nvme-core"], "去重只在同 stage 分区内");
+        assert_eq!(plan.boot_extra, ["nvme-core"], "dedup only within the same stage partition");
     }
 
-    // ---- 内核源码树解析：env > current 活动卷 > toml > 缺省 ----
+    // ---- Kernel source tree resolution: env > current active volume > toml > default ----
 
-    /// 解析序测试共用互斥锁（env 改动是进程全局的）。
+    /// Mutex shared by the resolution-order tests (env changes are process-global).
     static KSRC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// scratch project_root + 可选 current 状态文件（volume, arch）。
+    /// Scratch project_root + optional current state file (volume, arch).
     fn ksrc_scratch(name: &str, current: Option<(&str, &str)>) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cfg-ksrc-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -975,7 +1021,8 @@ require = ["bpf"]
         dir
     }
 
-    /// 假视图解析：volume → view_root/<volume>，目录真实存在（过 is_dir 守卫）。
+    /// Fake view resolution: volume → view_root/<volume>, the directory
+    /// really exists (passes the is_dir guard).
     fn fake_view_factory() -> (PathBuf, impl Fn(&str) -> anyhow::Result<PathBuf>) {
         let root = std::env::temp_dir().join(format!("cfg-ksrc-view-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1005,7 +1052,7 @@ require = ["bpf"]
         assert_eq!(
             src,
             KernelPathSource::CurrentVolume("ksrc-mainline".into()),
-            "切卷后内核树必须跟随活动卷，而非 toml 旧值"
+            "after a volume switch the kernel tree must follow the active volume, not the stale toml value"
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&view_root);
@@ -1044,11 +1091,12 @@ require = ["bpf"]
         let _g = KSRC_LOCK.lock().unwrap();
         clear_kernel_env();
         let dir = ksrc_scratch("gone", Some(("vanished-vol", "arm64")));
-        // 视图解析成功但目录不存在（OrbStack 未运行形态）→ 报错而非吃 toml 旧树
+        // View resolution succeeds but the directory is absent (OrbStack not
+        // running) → error rather than silently consuming the stale toml tree
         let absent_root =
             std::env::temp_dir().join(format!("cfg-ksrc-absent-{}", std::process::id()));
         let absent = move |v: &str| -> anyhow::Result<PathBuf> {
-            Ok(absent_root.join(v)) // 不创建目录
+            Ok(absent_root.join(v)) // directory not created
         };
         let err = format!(
             "{}",
@@ -1058,7 +1106,7 @@ require = ["bpf"]
             err.contains("vanished-vol") && err.contains("unreachable"),
             "{err}"
         );
-        // 视图解析本身失败（Linux 上 docker 缺位形态）→ 同样报错
+        // View resolution itself fails (docker missing on Linux) → also an error
         let boom = |v: &str| -> anyhow::Result<PathBuf> {
             anyhow::bail!("docker volume inspect {v} failed")
         };

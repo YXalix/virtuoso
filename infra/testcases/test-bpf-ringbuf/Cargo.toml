@@ -2,7 +2,7 @@
 name = "test-bpf-ringbuf"
 version = "0.1.0"
 edition = "2021"
-description = "程序态 eBPF 试点：aya 加载 .bpf.o（宿主 clang 产 BPF 目标码），kprobe 挂接 + ringbuf 结构化事件回流"
+description = "programmatic eBPF pilot: aya loads a .bpf.o (BPF object built by host clang), kprobe attach + structured events flowing back over the ringbuf"
 
 [build-dependencies]
 coda-scaffold = { path = "../coda-scaffold" }
@@ -10,11 +10,13 @@ coda-scaffold = { path = "../coda-scaffold" }
 [dependencies]
 coda = { path = "../coda" }
 
-# aya 是 Linux-only（bpf syscall + Linux libc 符号）：只对 linux 目标注入，
-# 宿主 check（macOS）走空桩不碰 aya；VM 构建恒 musl linux 目标。
+# aya is Linux-only (bpf syscall + Linux libc symbols): injected only for
+# linux targets; host checks (macOS) compile an empty stub and never touch
+# aya. VM builds are always the musl linux target.
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = "0.14.0"
 
-# 测试组：装进 /tests/bpf/，`virtuoso test --only bpf/` 整组选择
+# Test group: installed into /tests/bpf/, `virtuoso test --only bpf/`
+# selects the whole group
 [package.metadata.virtuoso]
 group = "bpf"

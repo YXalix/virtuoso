@@ -1,5 +1,5 @@
-//! 构建与资产管理命令：build / clean / skill。
-//! 实际构建逻辑在 builder，本模块只做配置投影与进程接线。
+//! Build and asset management commands: build / clean / skill.
+//! Actual build logic lives in builder; this module only projects config and wires processes.
 
 use std::path::Path;
 
@@ -10,7 +10,8 @@ use crate::SkillAction;
 pub fn run_build(busybox_only: bool) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
     if busybox_only {
-        // 仅备当前架构静态 BusyBox（四层供给链，builder 接管）
+        // Prepare only the static BusyBox for the current arch (four-layer provisioning
+        // chain; builder takes over)
         let arch = resolve_arch(&cfg, None)?;
         let supply = cfg.busybox_supply();
         let mut progress = crate::util::Progress::stdout();
@@ -20,9 +21,10 @@ pub fn run_build(busybox_only: bool) -> anyhow::Result<i32> {
     build_pair_for(&cfg, None, &[]).map(|_| 0)
 }
 
-/// 构建两段式引导对（test 路径以 run 目录 build.log 承载进度输出）。
-/// `extra_runtime` 为调用方强制追加的 runtime 模块条目（probe 恒开
-/// agent 通道，强制并入 virtio_console，不依赖组件开关）。
+/// Build the two-stage boot pair (the test path carries progress output in the run
+/// directory's build.log). `extra_runtime` holds runtime module entries the caller
+/// forces in (probe always enables the agent channel, forcibly merging in
+/// virtio_console without relying on component switches).
 pub(crate) fn build_pair_for(
     cfg: &Config,
     log_path: Option<&Path>,
@@ -78,7 +80,8 @@ pub fn run_clean() -> anyhow::Result<i32> {
             removed += 1;
         }
     }
-    // 暂存目录与组装产物（busybox/bpftrace 缓存保留，重下/重解包代价高）
+    // Staging directories and assembled artifacts (busybox/bpftrace caches are kept:
+    // re-downloading and re-unpacking them is expensive)
     for d in ["initramfs", "rootfs", "tools"] {
         let p = cfg.build_dir.join(d);
         if p.is_dir() {
@@ -87,7 +90,7 @@ pub fn run_clean() -> anyhow::Result<i32> {
             removed += 1;
         }
     }
-    // 用例 workspace 构建缓存（cargo target；含改名后遗留的旧产物）
+    // Test case workspace build cache (cargo target; includes stale leftovers from renames)
     let testcases_target = cfg.infra_dir.join("testcases/target");
     if testcases_target.is_dir() {
         std::fs::remove_dir_all(&testcases_target)?;
@@ -100,8 +103,9 @@ pub fn run_clean() -> anyhow::Result<i32> {
 
 pub fn run_skill(action: SkillAction) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
-    // 安装目标不自动探测（项目根上一级这种缺省树未必是想装入的树）；env
-    // KERNEL_PATH、toml kernel_path 与 current 活动卷都是明确指定。
+    // The install target is not auto-detected (a default tree such as the parent of
+    // the project root is not necessarily the tree to install into); env KERNEL_PATH,
+    // toml kernel_path, and the current active volume are all explicit specifications.
     let (kernel_path, source) = cfg.kernel_path()?;
     anyhow::ensure!(
         source != KernelPathSource::AutoDetect,
@@ -121,8 +125,9 @@ pub fn run_skill(action: SkillAction) -> anyhow::Result<i32> {
                     .join("skills")
                     .join(skill)
                     .join("SKILL.md");
-                // fs::copy 在 macOS 走 fclonefileat，OrbStack 卷视图不支持克隆
-                // 语义（EPERM）——SKILL.md 是文本，读写两步绕开。
+                // fs::copy uses fclonefileat on macOS, and OrbStack volume views do not
+                // support clone semantics (EPERM) — SKILL.md is text, so a read/write
+                // two-step works around it.
                 let body = std::fs::read_to_string(&src)?;
                 std::fs::write(dst_dir.join("SKILL.md"), body)?;
                 println!("  installed: {skill}");

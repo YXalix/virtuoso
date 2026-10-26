@@ -1,17 +1,21 @@
-//! virtuoso-agent — VM 内常驻 agent。
+//! virtuoso-agent — resident in-VM agent.
 //!
-//! 传输层：virtio-serial 端口（QEMU 侧 virtserialport name=virtuoso-agent，
-//! 宿主侧 chardev unix socket）。协议：JSON 行（每行一个对象）。
+//! Transport: a virtio-serial port (QEMU-side virtserialport
+//! name=virtuoso-agent, host-side chardev unix socket). Protocol: JSON lines
+//! (one object per line).
 //!
-//! - 启动即发 `{"type":"hello","agent":"virtuoso-agent","proto":1}`；
-//! - 请求 `{"id":N,"cmd":"<shell 命令>"}`：经 /bin/sh -c 执行，stdout/stderr
-//!   逐行以 `{"id":N,"type":"out"|"err","line":"..."}` 回吐，结束时发
-//!   `{"id":N,"type":"exit","code":C}`（信号死亡归一为 128+sig）；
-//! - 保留命令 `ping` → `{"id":N,"type":"pong"}`（宿主握手用）；
-//! - 解析失败的行回 `{"type":"error","reason":"..."}`（无 id）。
+//! - On startup sends `{"type":"hello","agent":"virtuoso-agent","proto":1}`;
+//! - Request `{"id":N,"cmd":"<shell command>"}`: executed via /bin/sh -c;
+//!   stdout/stderr lines stream back one by one as
+//!   `{"id":N,"type":"out"|"err","line":"..."}`, and when done it sends
+//!   `{"id":N,"type":"exit","code":C}` (signal deaths normalize to 128+sig);
+//! - Reserved command `ping` returns `{"id":N,"type":"pong"}` (host
+//!   handshake);
+//! - Unparseable lines get `{"type":"error","reason":"..."}` (no id).
 //!
-//! 设备发现：优先现成节点，再扫 sysfs class 并按 dev 属性 mknod 兜底
-//! （openEuler devtmpfs 留空 /dev 的实测怪癖）。
+//! Device discovery: prefer an existing node, then scan the sysfs class and
+//! fall back to mknod from the dev attribute (the observed openEuler quirk
+//! of devtmpfs leaving /dev empty).
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -23,9 +27,10 @@ use std::os::unix::process::ExitStatusExt;
 const PORT_NAME: &str = "virtuoso-agent";
 
 fn main() {
-    // std 运行时默认忽略 SIGPIPE；这里不做额外信号配置。
+    // The std runtime ignores SIGPIPE by default; no extra signal setup here.
     let Some(port) = open_agent_port() else {
-        // 无端口 = 未挂 virtio-serial 设备或驱动未加载：静默退出（init 守卫式启动）
+        // No port = no virtio-serial device attached or driver not loaded:
+        // exit silently (init starts us in guarded mode)
         eprintln!("virtuoso-agent: no {PORT_NAME} virtio-serial port found");
         std::process::exit(1);
     };
@@ -35,7 +40,7 @@ fn main() {
     )
     .is_err()
     {
-        return; // 端口立刻失效（宿主未连即断）：退出
+        return; // port went dead immediately (host disconnected before connecting): exit
     }
     let reader = match port.try_clone() {
         Ok(f) => BufReader::new(f),
@@ -47,12 +52,12 @@ fn main() {
             continue;
         }
         if handle_request(&port, &line).is_err() {
-            break; // 端口写失败：宿主已断开
+            break; // port write failed: host has disconnected
         }
     }
 }
 
-/// 处理一条请求行；Err = 端口不可写。
+/// Handle one request line; Err = port not writable.
 fn handle_request(port: &File, line: &str) -> std::io::Result<()> {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -76,8 +81,10 @@ fn handle_request(port: &File, line: &str) -> std::io::Result<()> {
     run_command(port, id, cmd)
 }
 
-/// fork+exec /bin/sh -c 并逐行回吐输出。两个读端各一个线程，行事件经
-/// channel 汇到主线程串行写端口（端口是单写者流，不能并发写）。
+/// fork+exec /bin/sh -c and stream output back line by line. One thread per
+/// read end; line events funnel through a channel to the main thread, which
+/// writes the port serially (the port is a single-writer stream and cannot
+/// be written concurrently).
 fn run_command(port: &File, id: u64, cmd: &str) -> std::io::Result<()> {
     let child = Command::new("/bin/sh")
         .arg("-c")
@@ -106,7 +113,8 @@ fn run_command(port: &File, id: u64, cmd: &str) -> std::io::Result<()> {
         handles.push(relay(err, "err", tx.clone()));
     }
     drop(tx);
-    // rx 结束 = 两个 relay 线程都已 EOF（senders 全部 drop），无需哨兵事件
+    // rx closing = both relay threads have hit EOF (all senders dropped); no
+    // sentinel event needed
     for ev in rx {
         send(port, json!({"id": id, "type": ev.0, "line": ev.1}))?;
     }
@@ -129,7 +137,8 @@ fn run_command(port: &File, id: u64, cmd: &str) -> std::io::Result<()> {
     send(port, json!({"id": id, "type": "exit", "code": code}))
 }
 
-/// 逐行泵一个管道到 channel；EOF 时 sender 随线程结束被 drop（channel 关闭）。
+/// Pump one pipe into the channel line by line; at EOF the sender is dropped
+/// as the thread ends (closing the channel).
 fn relay(
     pipe: impl Read + Send + 'static,
     kind: &'static str,
@@ -145,16 +154,17 @@ fn relay(
     })
 }
 
-/// 写一行 JSON 到端口（追加 \n，write_all 保证短写续写）。
+/// Write one JSON line to the port (appends \n; write_all resumes short
+/// writes).
 fn send(port: &File, v: Value) -> std::io::Result<()> {
     let mut buf = v.to_string();
     buf.push('\n');
     (&*port).write_all(buf.as_bytes())
 }
 
-/// 定位名为 PORT_NAME 的 virtserialport 并以读写打开。
+/// Locate the virtserialport named PORT_NAME and open it read-write.
 fn open_agent_port() -> Option<File> {
-    // 1) 现成节点（devtmpfs 正常创建 / udev 命名目录）
+    // 1) Existing node (created normally by devtmpfs / udev-named directory)
     let direct = [
         format!("/dev/virtio-ports/{PORT_NAME}"),
         "/dev/vport0p0".to_string(),
@@ -165,7 +175,7 @@ fn open_agent_port() -> Option<File> {
             return Some(f);
         }
     }
-    // 2) sysfs 扫描：/sys/class/virtio-ports/vportNpM/{name,dev}
+    // 2) sysfs scan: /sys/class/virtio-ports/vportNpM/{name,dev}
     let class = "/sys/class/virtio-ports";
     let entries = std::fs::read_dir(class).ok()?;
     let mut names: Vec<_> = entries.flatten().collect();
@@ -183,12 +193,14 @@ fn open_agent_port() -> Option<File> {
         if let Ok(f) = OpenOptions::new().read(true).write(true).open(&node) {
             return Some(f);
         }
-        // 3) mknod 兜底：devtmpfs 未建节点时按 dev 属性自造（怪癖表同款）
+        // 3) mknod fallback: create the node from the dev attribute when
+        // devtmpfs has not (same as the quirk table)
         let dev_attr = std::fs::read_to_string(format!("{class}/{vport}/dev")).ok()?;
         let (maj, min) = dev_attr.trim().split_once(':')?;
         let (maj, min): (u32, u32) = (maj.parse().ok()?, min.parse().ok()?);
         let cpath = std::ffi::CString::new(node.as_bytes()).ok()?;
-        // SAFETY: cpath 指向合法 C 字符串；mknodat(AT_FDCWD, ...) 为标准系统调用。
+        // SAFETY: cpath points to a valid C string; mknodat(AT_FDCWD, ...) is
+        // a standard syscall.
         let rc = unsafe {
             libc::mknodat(
                 libc::AT_FDCWD,

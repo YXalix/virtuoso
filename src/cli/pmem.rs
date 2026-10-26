@@ -1,14 +1,17 @@
-//! pmem 持久内存供给（[components.pmem]）：DT 途径（arm64/riscv64 直启无
-//! ACPI，QEMU nvdimm 的 NFIT 需 EFI 引导才可见，故用 pmem-region 设备树节点
-//! 绕开）。产线三件套落 target/build/pmem/：
-//! 1) ram.img —— 主内存后端文件（memory-backend-file share=on），挖出的
-//!    pmem 区即宿主文件 backed，guest 写入持久落盘；
-//! 2) <machine>.dtb —— dumpdtb（按当前 -smp/-m 生成）+ fdtput 补丁（根节点
-//!    注入 pmem-region@<base>），经 -dtb 传入替换 QEMU 生成版；
-//! 3) mem_limit —— cmdline 追加 `mem=<总内存 − pmem 区>`：QEMU 会按 -m
-//!    全量重建 /memory（无法缩 DTB），故由内核侧把 pmem 区排除出线性
-//!    内存模型（等价 x86 memmap= 语义），devm_memremap_pages 才能建
-//!    ZONE_DEVICE struct page（否则 sparse subsection 已存在 → -EEXIST）。
+//! pmem persistent memory provisioning ([components.pmem]): the DT route (arm64/riscv64
+//! direct boot has no ACPI, and QEMU nvdimm's NFIT only becomes visible with an EFI
+//! boot, hence the pmem-region device tree node to work around it). Three artifacts
+//! land in target/build/pmem/:
+//! 1) ram.img — the main memory backend file (memory-backend-file share=on); the
+//!    carved-out pmem region is backed by a host file, and guest writes persist to disk;
+//! 2) <machine>.dtb — dumpdtb (generated per the current -smp/-m) + an fdtput patch
+//!    (a pmem-region@<base> injected into the root node), passed via -dtb to replace
+//!    the QEMU-generated version;
+//! 3) mem_limit — the cmdline gets `mem=<total memory − pmem region>` appended: QEMU
+//!    rebuilds /memory in full per -m (the DTB cannot be shrunk), so the kernel side
+//!    must exclude the pmem region from the linear memory model (equivalent to x86
+//!    memmap= semantics) before devm_memremap_pages can create ZONE_DEVICE struct
+//!    pages (otherwise the sparse subsection already exists → -EEXIST).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,7 +22,7 @@ use crate::Arch;
 
 use crate::config::Config;
 
-/// [components.pmem] enabled 才 Some（产线三件套见模块文档）。
+/// Some only when [components.pmem] enabled (the three artifacts are in the module docs).
 pub(crate) fn pmem_opt(
     cfg: &Config,
     arch: Arch,
@@ -57,7 +60,8 @@ pub(crate) fn pmem_opt(
     )))
 }
 
-/// 字节数 → "768M"（MiB 整除时）/ 裸数字（QEMU 与内核 mem= 均按字节解析）。
+/// Bytes → "768M" (when evenly divisible by MiB) / bare number (both QEMU and the
+/// kernel parse mem= as bytes).
 fn render_memory(bytes: u64) -> String {
     if bytes != 0 && bytes.is_multiple_of(1024 * 1024) {
         format!("{}M", bytes / (1024 * 1024))
@@ -66,7 +70,7 @@ fn render_memory(bytes: u64) -> String {
     }
 }
 
-/// "256M"/裸数字 → 字节数（QEMU 语义：裸数字 = 字节）。
+/// "256M"/bare number → bytes (QEMU semantics: bare number = bytes).
 fn memory_bytes(s: &str, what: &str) -> anyhow::Result<u64> {
     let (n, unit) = crate::util::parse_memory(s)
         .map_err(|e| anyhow::anyhow!("[components.pmem] invalid {what}: {e}"))?;
@@ -76,7 +80,8 @@ fn memory_bytes(s: &str, what: &str) -> anyhow::Result<u64> {
     })
 }
 
-/// 文件缺失或大小不符才重建（稀疏）；已有内容保留 —— guest 写入跨 run 持久。
+/// Recreate (sparse) only when the file is missing or its size mismatches; existing
+/// content is kept — guest writes persist across runs.
 fn ensure_sparse(path: &Path, bytes: u64) -> anyhow::Result<()> {
     let mismatch = std::fs::metadata(path)
         .map(|m| m.len() != bytes)
@@ -90,7 +95,7 @@ fn ensure_sparse(path: &Path, bytes: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 32 位 DT cell 序（高字在前）→ fdtput -t x 的十六进制参数表。
+/// 32-bit DT cell sequence (high word first) → hex argument list for fdtput -t x.
 fn dt_cells(v: u64, cells: u64) -> Vec<String> {
     (0..cells)
         .rev()
@@ -134,9 +139,10 @@ fn fdtput(dtb: &Path, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// dumpdtb 生成 QEMU 设备树并打 pmem 补丁：根节点注入 pmem-region@<base>
-/// （of_pmem 绑定 → 免 ndctl /dev/pmem0）。区间排除出线性内存由 cmdline
-/// `mem=` 完成（QEMU 对 -dtb 会按 -m 全量重建 /memory，DTB 缩减无效）。
+/// Generate the QEMU device tree with dumpdtb and apply the pmem patch: inject
+/// pmem-region@<base> into the root node (bound by of_pmem → no ndctl /dev/pmem0
+/// needed). Excluding the region from linear memory is done via the cmdline `mem=`
+/// (with -dtb, QEMU rebuilds /memory in full per -m; shrinking the DTB has no effect).
 fn patch_pmem_dtb(
     cfg: &Config,
     arch: Arch,
@@ -173,15 +179,16 @@ fn patch_pmem_dtb(
         String::from_utf8_lossy(&out.stderr).trim()
     );
 
-    // 根节点 cell 宽度（QEMU virt 为 #address-cells=2 / #size-cells=2）
+    // Root node cell widths (QEMU virt uses #address-cells=2 / #size-cells=2)
     let read_cells = |prop: &str| -> anyhow::Result<u64> {
         Ok(fdtget_words(&dtb, "/", prop)?.first().copied().unwrap_or(2))
     };
     let addr_cells = read_cells("#address-cells")?;
     let size_cells = read_cells("#size-cells")?;
 
-    // pmem 区固定在 RAM 顶部：dumpdtb 的 /memory reg 给出 RAM 基址/大小
-    // （生成参数与启动一致；QEMU 启动时的 /memory 回写与补丁节点无关）
+    // The pmem region sits at the top of RAM: dumpdtb's /memory reg gives the RAM
+    // base/size (generation args match boot; QEMU's /memory rewrite at boot is
+    // unrelated to the patched node)
     let reg = fdtget_words(&dtb, "/memory", "reg")?;
     anyhow::ensure!(
         reg.len() == (addr_cells + size_cells) as usize,
@@ -202,7 +209,7 @@ fn patch_pmem_dtb(
     );
     let pmem_base = base + total_bytes - pmem_bytes;
 
-    // 根节点 pmem-region 平台设备（of_pmem 绑定）
+    // Root node pmem-region platform device (bound by of_pmem)
     let node = format!("/pmem@{pmem_base:x}");
     fdtput(&dtb, &["-c".to_string(), node.clone()])?;
     fdtput(

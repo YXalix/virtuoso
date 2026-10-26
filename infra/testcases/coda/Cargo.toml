@@ -2,6 +2,6 @@
 name = "coda"
 version = "0.1.0"
 edition = "2021"
-description = "Virtuoso 测试框架（乐章终章——测例是整场构建的判定）：标记协议 v1 的宏与运行器（std + musl 静态；C 测试体经 FFI 共用同一计数/打印路径）"
+description = "Virtuoso test framework (the coda — test cases are the verdict of the whole build): marker protocol v1 macros and runner (std + musl static; C test bodies share the same counting/printing path via FFI)"
 
 [dependencies]

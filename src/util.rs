@@ -1,21 +1,25 @@
-//! 顶层工具集（原 common 基础层摊平后的单文件形态）。
+//! Top-level utility set (the single-file form of the original common base
+//! layer after flattening).
 //!
-//! 分节：中断退出码常量 → 文件系统与进程环境 → 人类可读格式化 → 进度输出
-//! → POSIX shell 单参引用 → 时间工具 → 终端呈现原语 → 内存单位解析。
+//! Sections: interrupt exit code constant → filesystem and process
+//! environment → human-readable formatting → progress output → POSIX shell
+//! single-arg quoting → time utilities → terminal presentation primitives →
+//! memory unit parsing.
 
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------- 中断退出码
+// ---------------------------------------------------------------- Interrupt exit code
 
-/// Ctrl-C / 信号中断退出码（与 shell 信号语义一致）。
+/// Ctrl-C / signal interrupt exit code (matches shell signal semantics).
 ///
-/// guardian（Ctrl-C 守护）不依赖 judge，但需要同一常量——故钉在这里，
-/// judge（唯一语义表）re-export 对外。
+/// guardian (the Ctrl-C guard) does not depend on judge but needs the same
+/// constant — so it is pinned here and re-exported by judge (the sole
+/// semantics table).
 pub(crate) const EXIT_INTERRUPTED: i32 = 130;
 
-// ---------------------------------------------------------------- 文件系统与进程环境
+// ---------------------------------------------------------------- Filesystem and process environment
 
-/// 定位可执行文件的完整路径（不在 PATH 返回 None）。
+/// Locate an executable's full path (None when not in PATH).
 pub(crate) fn which_path(bin: &str) -> Option<PathBuf> {
     if bin.contains('/') {
         return Path::new(bin).is_file().then(|| PathBuf::from(bin));
@@ -27,18 +31,18 @@ pub(crate) fn which_path(bin: &str) -> Option<PathBuf> {
     })
 }
 
-/// 定位可执行文件是否在 PATH（verify 用）。
+/// Whether an executable is in PATH (used by verify).
 pub(crate) fn which(bin: &str) -> bool {
     which_path(bin).is_some()
 }
 
-/// 置 0o755（下载产物 / VM 内 init / 测试二进制统一使用）。
+/// Set 0o755 (used uniformly for downloaded artifacts / in-VM init / test binaries).
 pub(crate) fn set_executable(p: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755))
 }
 
-/// 读取文件前 4 字节（ELF 魔数校验的共用原语）。
+/// Read the first 4 bytes of a file (shared primitive for ELF magic checks).
 fn read_magic(p: &Path) -> std::io::Result<[u8; 4]> {
     use std::io::Read;
     let mut magic = [0u8; 4];
@@ -46,16 +50,16 @@ fn read_magic(p: &Path) -> std::io::Result<[u8; 4]> {
     Ok(magic)
 }
 
-/// 文件是否以 \x7fELF 魔数开头（读取失败一律视为否）。
+/// Whether the file starts with the \x7fELF magic (read failures always count as no).
 pub(crate) fn is_elf(p: &Path) -> bool {
     read_magic(p)
         .map(|m| m == [0x7f, b'E', b'L', b'F'])
         .unwrap_or(false)
 }
 
-// ---------------------------------------------------------------- 人类可读格式化
+// ---------------------------------------------------------------- Human-readable formatting
 
-/// ls -lh 风格的大小（36.7M / 1.5G）。
+/// ls -lh style size (36.7M / 1.5G).
 pub(crate) fn human_size_ls(bytes: u64) -> String {
     let (n, unit) = if bytes >= 1 << 30 {
         (bytes as f64 / (1 << 30) as f64, "G")
@@ -73,11 +77,14 @@ pub(crate) fn human_size_ls(bytes: u64) -> String {
     }
 }
 
-// ---------------------------------------------------------------- 构建增量
+// ---------------------------------------------------------------- Build incrementality
 
-/// 暂存树内容指纹：相对路径 + 条目类型 + 长度/符号链接目标的 SipHash 串接
-/// （std 自带 DefaultHasher，无新依赖；排序遍历保证确定性）。镜像级增量用：
-/// 指纹未变 = 输入字节不变，可安全跳过重建。`extra` 并入指纹（构建方式/参数）。
+/// Content fingerprint of the staging tree: a SipHash concatenation of
+/// relative paths + entry types + lengths/symlink targets (std's own
+/// DefaultHasher, no new dependency; sorted traversal guarantees
+/// determinism). Used for image-level incrementality: an unchanged
+/// fingerprint = unchanged input bytes, safe to skip a rebuild. `extra` is
+/// folded into the fingerprint (build method/args).
 pub(crate) fn tree_fingerprint(dir: &Path, extra: &str) -> anyhow::Result<String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -118,9 +125,11 @@ pub(crate) fn tree_fingerprint(dir: &Path, extra: &str) -> anyhow::Result<String
     Ok(format!("{:016x}", h.finish()))
 }
 
-/// 镜像级增量：暂存树指纹（含构建方式 `extra`）与 `<out>.stamp` 一致且产物
-/// 在 → 跳过重建（返回 false）；否则执行 `build` 并落新 stamp。
-/// stamp 放产物旁（git 忽略的 artifacts 目录），删产物即失效。
+/// Image-level incrementality: if the staging tree fingerprint (including
+/// the build method `extra`) matches `<out>.stamp` and the artifact exists
+/// → skip the rebuild (return false); otherwise run `build` and write a new
+/// stamp. The stamp sits next to the artifact (in the git-ignored artifacts
+/// directory); deleting the artifact invalidates it.
 pub(crate) fn if_changed(
     dir: &Path,
     extra: &str,
@@ -140,21 +149,22 @@ pub(crate) fn if_changed(
     Ok(true)
 }
 
-// ---------------------------------------------------------------- 进度输出
+// ---------------------------------------------------------------- Progress output
 
-/// 进度输出通道：stdout 恒打，可选同步写日志文件。
-/// builder（构建流水线）与 forge（kernel 命令组）共用同一形态。
+/// Progress output channel: always prints to stdout, optionally mirrors to a
+/// log file synchronously. builder (the build pipeline) and forge (the
+/// kernel command group) share this same form.
 pub(crate) struct Progress {
     log: Option<std::fs::File>,
 }
 
 impl Progress {
-    /// 仅终端形态。
+    /// Terminal-only form.
     pub(crate) fn stdout() -> Self {
         Self { log: None }
     }
 
-    /// 终端 + 追加日志形态（运行工件 build.log）。
+    /// Terminal + append-log form (the run artifact build.log).
     pub(crate) fn with_log(path: &std::path::Path) -> std::io::Result<Self> {
         let log = std::fs::OpenOptions::new()
             .create(true)
@@ -172,14 +182,17 @@ impl Progress {
     }
 }
 
-// ---------------------------------------------------------------- POSIX shell 单参引用
+// ---------------------------------------------------------------- POSIX shell single-arg quoting
 
-// POSIX shell 单参引用（shlex.quote 语义）：安全字符原样，其余整体单引号
-// 包裹。用于把 argv 渲染成可直接复制执行的一行命令（launcher 的
-// `command_line`），以及把路径/URL/ref 安全嵌入容器 `sh -c` 脚本（forge）。
+// POSIX shell single-arg quoting (shlex.quote semantics): safe characters
+// verbatim, everything else wrapped whole in single quotes. Used to render
+// argv as a one-line command that can be copied and run directly (the
+// launcher's `command_line`), and to embed paths/URLs/refs safely in
+// container `sh -c` scripts (forge).
 
-/// 安全字符集：字母数字与 shell 元字符之外的普通文件名成分——单参不含
-/// 空白/引号/glob 字符时原样输出即等价。
+/// Safe character set: alphanumerics plus ordinary filename characters
+/// outside the shell metacharacters — a single arg containing no
+/// whitespace/quotes/glob characters is equivalent when emitted verbatim.
 fn is_safe(arg: &str) -> bool {
     !arg.is_empty()
         && arg
@@ -187,7 +200,8 @@ fn is_safe(arg: &str) -> bool {
             .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'@' | b'%' | b'+' | b','))
 }
 
-/// POSIX shell 单参引用：安全字符原样，其余整体单引号包裹（内嵌单引号转义）。
+/// POSIX shell single-arg quoting: safe characters verbatim, everything
+/// else wrapped in single quotes (embedded quotes escaped).
 pub(crate) fn quote(arg: &str) -> String {
     if is_safe(arg) {
         return arg.to_string();
@@ -195,9 +209,9 @@ pub(crate) fn quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
-// ---------------------------------------------------------------- 时间工具
+// ---------------------------------------------------------------- Time utilities
 
-/// 当前 Unix 毫秒（时钟回拨时退化为 0）。
+/// Current Unix milliseconds (degrades to 0 if the clock is behind).
 pub(crate) fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -205,7 +219,7 @@ pub(crate) fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Unix 毫秒 → "YYYY-MM-DD HH:MM:SS UTC"（civil_from_days 算法）。
+/// Unix milliseconds → "YYYY-MM-DD HH:MM:SS UTC" (civil_from_days algorithm).
 pub(crate) fn format_utc(ms: u64) -> String {
     let secs = (ms / 1000) as i64;
     let days = secs.div_euclid(86_400);
@@ -219,7 +233,8 @@ pub(crate) fn format_utc(ms: u64) -> String {
     )
 }
 
-/// 公历日数 → (年, 月, 日)（Howard Hinnant 的 civil_from_days 算法）。
+/// Days since the Unix epoch → (year, month, day) (Howard Hinnant's
+/// civil_from_days algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -233,14 +248,16 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-// ---------------------------------------------------------------- 终端呈现原语
+// ---------------------------------------------------------------- Terminal presentation primitives
 
-// 终端呈现原语：TTY 感知颜色与状态图标。
+// Terminal presentation primitives: TTY-aware colors and status icons.
 //
-// 约定：颜色只修饰不承载语义（非 TTY / NO_COLOR 自动退化纯文本）；
-// 状态图标 ✓ / ✗ 与 [PASS]/[FAIL] 同义。
+// Convention: color only decorates and carries no semantics (non-TTY /
+// NO_COLOR automatically degrade to plain text);
+// status icons ✓ / ✗ are synonymous with [PASS]/[FAIL].
 
-/// stdout 是否着色（TERM 存在且非 dumb，且无 NO_COLOR；仅影响颜色不影响判定）。
+/// Whether stdout is colored (TERM present and not dumb, and no NO_COLOR;
+/// affects colors only, never verdicts).
 pub(crate) fn tty() -> bool {
     std::env::var_os("TERM")
         .map(|t| t != "dumb")
@@ -248,7 +265,7 @@ pub(crate) fn tty() -> bool {
         && std::env::var_os("NO_COLOR").is_none()
 }
 
-/// ANSI 包裹（非 TTY 原样返回）。
+/// ANSI wrapping (returned verbatim when not a TTY).
 pub(crate) fn paint(code: &str, s: &str) -> String {
     if tty() {
         format!("\x1b[{code}m{s}\x1b[0m")
@@ -257,22 +274,22 @@ pub(crate) fn paint(code: &str, s: &str) -> String {
     }
 }
 
-/// 粗体。
+/// Bold.
 pub(crate) fn bold(s: &str) -> String {
     paint("1", s)
 }
 
-/// 绿（通过）。
+/// Green (pass).
 pub(crate) fn green(s: &str) -> String {
     paint("0;32", s)
 }
 
-/// 红（失败）。
+/// Red (fail).
 pub(crate) fn red(s: &str) -> String {
     paint("0;31", s)
 }
 
-/// 状态图标（按最严重级别取）：✓ / ✗。
+/// Status icon (by most severe level): ✓ / ✗.
 pub(crate) fn icon(level: Icon) -> String {
     match level {
         Icon::Pass => green("✓"),
@@ -285,11 +302,12 @@ pub(crate) enum Icon {
     Fail,
 }
 
-// ---------------------------------------------------------------- 内存单位解析
+// ---------------------------------------------------------------- Memory unit parsing
 
-// 内存量字符串解析（NUMA 拓扑与 pmem 组件共用同一张合法单位表）。
+// Memory amount string parsing (NUMA topology and the pmem component share
+// the same table of legal units).
 
-/// 内存单位后缀；`Bare` = 无单位裸数字。
+/// Memory unit suffix; `Bare` = a bare number without a unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemUnit {
     G,
@@ -298,7 +316,7 @@ pub(crate) enum MemUnit {
 }
 
 impl MemUnit {
-    /// 数值 × 单位 → 规范字符串（"2G" / "512M" / "1024"）。
+    /// Value × unit → canonical string ("2G" / "512M" / "1024").
     pub(crate) fn render(self, n: u64) -> String {
         match self {
             MemUnit::G => format!("{n}G"),
@@ -307,7 +325,7 @@ impl MemUnit {
         }
     }
 
-    /// 数值 → MiB（G = ×1024；M 与裸数字原值）。
+    /// Value → MiB (G = ×1024; M and bare numbers unchanged).
     pub(crate) fn to_mib(self, n: u64) -> u64 {
         match self {
             MemUnit::G => n * 1024,
@@ -316,8 +334,8 @@ impl MemUnit {
     }
 }
 
-/// 解析 "1G" / "512M" / "1024"（单位大小写不敏感）→ (数值, 单位)。
-/// 非数字前缀或单位不在 G/M/裸数字表内时报错。
+/// Parse "1G" / "512M" / "1024" (unit case-insensitive) → (value, unit).
+/// Errors on a non-numeric prefix or a unit outside the G/M/bare table.
 pub(crate) fn parse_memory(s: &str) -> Result<(u64, MemUnit), String> {
     let digits = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let n: u64 = s[..digits]
@@ -332,7 +350,7 @@ pub(crate) fn parse_memory(s: &str) -> Result<(u64, MemUnit), String> {
     Ok((n, unit))
 }
 
-// ---------------------------------------------------------------- 测试
+// ---------------------------------------------------------------- Tests
 
 #[cfg(test)]
 mod tests {
@@ -340,24 +358,25 @@ mod tests {
 
     #[test]
     fn paint_degrades_without_tty() {
-        // 测试进程 TERM 可能存在；两个分支都要产出合法字符串
+        // The test process may have TERM set; both branches must produce a valid string
         let s = paint("1", "x");
         assert!(s == "x" || s == "\x1b[1mx\x1b[0m");
     }
 
-    /// 历法锚点：纪元边界、平年/闰年切换（civil_from_days 只在这几类
-    /// 规则上出错，锚点钉死即够）。
+    /// Calendar anchors: epoch boundaries, common/leap year transitions
+    /// (civil_from_days only ever errs on these rule classes; pinning these
+    /// anchors suffices).
     #[test]
     fn format_utc_calendar_anchors() {
         assert_eq!(format_utc(0), "1970-01-01 00:00:00 UTC");
         assert_eq!(format_utc(1_000), "1970-01-01 00:00:01 UTC");
         assert_eq!(format_utc(86_399_999), "1970-01-01 23:59:59 UTC");
-        // 平年→闰年：2024-02-28 与 02-29
+        // Common→leap year: 2024-02-28 and 02-29
         assert_eq!(format_utc(1_709_107_200_000), "2024-02-28 08:00:00 UTC");
         assert_eq!(format_utc(1_709_193_600_000), "2024-02-29 08:00:00 UTC");
-        // 闰年→平年回落：2024-03-01
+        // Leap→common year fallthrough: 2024-03-01
         assert_eq!(format_utc(1_709_280_000_000), "2024-03-01 08:00:00 UTC");
-        // 年末进位与 400 年闰 2000
+        // Year-end carry and the 400-year leap year 2000
         assert_eq!(format_utc(1_735_689_599_999), "2024-12-31 23:59:59 UTC");
         assert_eq!(format_utc(946_684_800_000), "2000-01-01 00:00:00 UTC");
     }
@@ -365,7 +384,7 @@ mod tests {
     #[test]
     fn unix_ms_is_epoch_scale() {
         let now = unix_ms();
-        assert!(now > 1_700_000_000_000); // 2023-11 之后（装机即真）
+        assert!(now > 1_700_000_000_000); // after 2023-11 (true from install onward)
     }
 
     #[test]

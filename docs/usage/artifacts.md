@@ -1,52 +1,57 @@
-# 运行工件与分诊
+# Run Artifacts and Triage
 
-每次 `virtuoso test` 写入 `target/runs/<unix_ms>-<arch>/`（保留最近
-20 次）；`probe` 也写 run 目录（内容为 `serial.log` + `qemu-stderr.log` +
-`agent-events.jsonl`，无 verdict）。这些工件是 AI 与人共用的分诊数据源。
+Every `virtuoso test` writes to `target/runs/<unix_ms>-<arch>/` (the most recent
+20 runs are kept); `probe` also writes a run directory (containing `serial.log` + `qemu-stderr.log` +
+`agent-events.jsonl`, with no verdict). These artifacts are the triage data source shared by AI and humans.
 
-## run 目录内容
+## Run Directory Contents
 
-| 文件 | 内容 |
+| File | Contents |
 |---|---|
-| `serial.log` | QEMU stdout：内核串口 + 测试标记（含 panic 栈），逐行同步落盘 |
-| `qemu-stderr.log` | QEMU 自身告警 |
-| `build.log` | 本次构建输出（成功也保留） |
-| `events.jsonl` | judge 逐行解析的结构化事件（test_start / test_end / assert / summary / marker / panic / oops / run_end） |
-| `verdict.json` | 汇总判定 + 运行指纹（内核 mtime/大小、QEMU 版本、拓扑、超时） |
+| `serial.log` | QEMU stdout: kernel serial console + test markers (including panic stacks), persisted to disk line by line in sync |
+| `qemu-stderr.log` | QEMU's own warnings |
+| `build.log` | This run's build output (kept even on success) |
+| `events.jsonl` | Structured events parsed line by line by the judge (test_start / test_end / assert / summary / marker / panic / oops / run_end) |
+| `verdict.json` | Aggregated verdict + run fingerprint (kernel mtime/size, QEMU version, topology, timeout) |
 
-**终端呈现同样按流分离**（test / probe）：运行中终端只回显 guest
-串口（即 `serial.log` 的内容）；QEMU 自身输出不刷屏，只落 `qemu-stderr.log`，
-失败或超时收尾时回显其末尾至多 40 行（QEMU 早夭、参数被拒的现场就在这几行
-里），成功保持安静。`virtuoso shell`（含 `--gdb` 调试挂起）是交互式会话，
-stdio 天然合流，QEMU 输出仍实时可见。
+**Terminal presentation separates the streams the same way** (test / probe): while running,
+the terminal only echoes the guest serial console (i.e. the contents of `serial.log`);
+QEMU's own output never floods the screen — it goes only to `qemu-stderr.log`,
+and on a failure or timeout teardown at most its last 40 lines are echoed (the scene of an
+early QEMU death or rejected arguments lives in those few lines); on success it stays quiet.
+`virtuoso shell` (including the `--gdb` debug suspend) is an interactive session where
+stdio is naturally merged, so QEMU output remains visible in real time.
 
-## Verdict 语义
+## Verdict Semantics
 
-**判定以 verdict 为准，退出码只是接口契约**：`-no-reboot` 下内核 panic 会让
-QEMU 以 exit 0 退出——只看退出码会假通过；verdict 用 `TEST_COMPLETE` 标记与
-退出码对账，panic / oops 独立成档。
+**The verdict is the authority; the exit code is merely an interface contract**: under
+`-no-reboot`, a kernel panic makes QEMU exit with code 0 — judging by exit code alone yields a
+false pass; the verdict reconciles the `TEST_COMPLETE` marker against the exit code, and
+panic / oops get their own categories.
 
-| verdict | 语义 |
+| verdict | Semantics |
 |---|---|
-| `passed` | 全部用例通过，标记协议走完 |
-| `failed` | 有用例 FAILED（或汇总计数对不上） |
-| `timeout` | 墙钟超时，进程组被收割 |
-| `panic` | 内核 panic（独立成档；exit 可能是 0 或 124，见[故障排查](troubleshooting.md)） |
-| `incomplete` | exit 0 但标记协议没走完——按失败处理，不得当作通过 |
-| `interrupted` | Ctrl-C 中断收尾（工件已落盘；verdict.json 可能缺失） |
-| `build_failed` | 构建阶段失败 |
-| `unknown` | 未识别收尾形态 |
+| `passed` | All cases passed; the marker protocol ran to completion |
+| `failed` | Some case FAILED (or the summary counts do not add up) |
+| `timeout` | Wall-clock timeout; the process group was reaped |
+| `panic` | Kernel panic (its own category; exit may be 0 or 124, see [Troubleshooting](troubleshooting.md)) |
+| `incomplete` | exit 0 but the marker protocol did not run to completion — treated as failure, must not be counted as a pass |
+| `interrupted` | Interrupted by Ctrl-C during teardown (artifacts persisted to disk; verdict.json may be missing) |
+| `build_failed` | The build stage failed |
+| `unknown` | Unrecognized termination shape |
 
-## 分析入口
+## Analysis Entry Points
 
 ```bash
-cat target/runs/<id>/verdict.json        # 机读判定唯一面（八态 verdict + 逐测试明细）
-virtuoso test --replay-until-fail 5      # flaky 返场：首个非 passed 即停
+cat target/runs/<id>/verdict.json        # the only machine-readable verdict surface (eight-state verdict + per-test details)
+virtuoso test --replay-until-fail 5      # flaky replay: stops at the first non-passed verdict
 ```
 
-判定呈现不设第二命令：`test` 收尾打印 verdict 行；逐事件事实在
-`events.jsonl`，人工细读直接看 run 目录下的 `serial.log` 与
-`verdict.json`。Ctrl-C 中断的 run 工件已落盘，但 verdict.json 可能缺失
-（标记协议未走完，人工判读按失败处理）。
+There is no second command for verdict presentation: `test` prints the verdict line at the end;
+the per-event facts live in
+`events.jsonl`, and for close human reading go straight to `serial.log` and
+`verdict.json` in the run directory. A run interrupted by Ctrl-C has its artifacts persisted
+to disk, but verdict.json may be missing
+(the marker protocol did not complete; human judgment should treat it as a failure).
 
-症状速查见 [故障排查](troubleshooting.md)。
+For quick symptom lookup, see [Troubleshooting](troubleshooting.md).

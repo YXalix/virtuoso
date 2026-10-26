@@ -2,7 +2,7 @@
 name = "test-example"
 version = "0.1.0"
 edition = "2021"
-description = "示例用例（Rust 入口 + C 测试体经 FFI）：新用例复制本目录改 TESTS 列表与 c/ 内容"
+description = "example test case (Rust entry + C test body via FFI): new test cases copy this directory and adapt the TESTS list and c/ contents"
 
 [build-dependencies]
 coda-scaffold = { path = "../coda-scaffold" }
@@ -10,7 +10,8 @@ coda-scaffold = { path = "../coda-scaffold" }
 [dependencies]
 coda = { path = "../coda" }
 
-# 测试组（可选）：声明后二进制装进 /tests/<group>/（init 里名字 = group/case，
-# `virtuoso test --only <group>/` 整组选择）；缺省平铺 /tests/。
+# Test group (optional): when declared, the binary is installed into
+# /tests/<group>/ (name inside init = group/case, `virtuoso test --only
+# <group>/` selects the whole group); default is flat in /tests/.
 # [package.metadata.virtuoso]
 # group = "smoke"

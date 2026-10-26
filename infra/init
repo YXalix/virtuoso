@@ -82,9 +82,11 @@ mount_filesystems() {
     mount -t devtmpfs none /dev 2>/dev/null
     mount -t tmpfs none /tmp 2>/dev/null
     mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
-    # tracefs 挂点由内核 tracefs 初始化自建（sysfs_create_mount_point），内建
-    # (=y) 时开机即存在；eBPF tracepoint 系（bpftrace tracepoint:、libbpf/aya
-    # tp attach）依赖它可见。kprobe 走 perf PMU 不经 tracefs，已挂时 EBUSY 吞掉。
+    # The tracefs mount point is created by kernel tracefs init itself
+    # (sysfs_create_mount_point); it exists from boot when built in (=y).
+    # eBPF tracepoint families (bpftrace tracepoint:, libbpf/aya tp attach)
+    # depend on it being visible. kprobe goes through perf PMU, not tracefs;
+    # swallow EBUSY when it is already mounted.
     mount -t tracefs none /sys/kernel/tracing 2>/dev/null || true
 
     mkdir -p /dev/pts /dev/shm 2>/dev/null
@@ -241,16 +243,19 @@ main() {
     # Mount filesystems
     mount_filesystems
 
-    # Phase 2 InitHook 注入点：overture 生成的声明式定制（缺省无此文件）
+    # Phase 2 InitHook injection point: declarative customization generated
+    # by overture (no such file by default)
     [ -f /init-hooks.sh ] && . /init-hooks.sh
 
     # Load test modules (boot-critical ones were loaded by the initramfs)
     load_modules
 
-    # Virtuoso tools（常驻工具，非用例）：随 tools.img 外挂数据盘挂 /tools
-    # （见 /init-hooks.sh，PATH 已注入），守卫式启动。仅当工具盘挂载成功且
-    # virtio-serial 端口驱动已加载时才会真正驻留；两者缺一 agent 自行退出，
-    # 交互与 auto_test 行为零影响。
+    # Virtuoso tools (resident tools, not test cases): mounted at /tools from
+    # the attached tools.img data disk (see /init-hooks.sh, PATH already
+    # injected), started in guarded mode. They only actually stay resident
+    # when the tools disk mounts and the virtio-serial port driver is loaded;
+    # missing either, the agent exits on its own — zero impact on interactive
+    # and auto_test behavior.
     if command -v virtuoso-agent >/dev/null 2>&1; then
         virtuoso-agent >/dev/null 2>&1 &
     fi

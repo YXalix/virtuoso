@@ -1,31 +1,31 @@
-# 贡献约定
+# Contribution Guidelines
 
-## 验证循环
+## Verification Loop
 
-改 Rust 源码必须先跑 `cargo clippy --all-targets -- -D warnings`（CI 同款
-门禁，本地不过别提交）；再 `virtuoso doctor → virtuoso test`。判定以
-test 收尾的 verdict 行为准，机读唯一面 = run 目录下的 `verdict.json`；
-`verdict: passed` 才算通过。
+Any change to Rust source must first pass `cargo clippy --all-targets -- -D warnings` (the same
+gate as CI — if it fails locally, do not commit); then run `virtuoso doctor → virtuoso test`.
+The verdict line printed at the end of `test` is the authority; the only machine-readable surface
+= `verdict.json` in the run directory; only `verdict: passed` counts as a pass.
 
-## 约定
+## Conventions
 
-- VM 内 shell 代码保持 POSIX 兼容（`infra/init` / `infra/init-initramfs`
-  跑在 BusyBox `sh`，不是 bash）；改完先 `busybox sh -n` 语法校验。
-- harness 暴露新行为 → 配一个对应测试用例。
-- 用户可见行为变化 → 更新本文档站（`docs/`）与
-  `devkit/skills/kernel-dev/SKILL.md`。
-- 冻结项不许动：标记协议 v1、test 退出码语义、argv 冻结基线——
-  详见[冻结契约](concepts/contracts.md)与 AGENTS.md「冻结的不变量」。
-- 文档只改 `docs/`（文档唯一事实来源，别处引用不复制内容）；push main 自动
-  发布 gh-pages。
+- Shell code inside the VM stays POSIX-compatible (`infra/init` / `infra/init-initramfs` run
+  under BusyBox `sh`, not bash); after editing, validate syntax with `busybox sh -n` first.
+- New behavior exposed by the harness → add a matching test case.
+- User-visible behavior change → update this docs site (`docs/`) and
+  `devkit/skills/kernel-dev/SKILL.md`.
+- Frozen items must not be touched: marker protocol v1, test exit-code semantics, frozen argv
+  baseline — see [Frozen Contracts](concepts/contracts.md) and the "Frozen Invariants" section of AGENTS.md.
+- Only edit docs in `docs/` (the single source of truth for documentation; elsewhere, reference it
+  instead of copying content); pushing main automatically publishes gh-pages.
 
 ## CI/CD
 
-`.github/workflows/` 四条流水线：
+Four pipelines in `.github/workflows/`:
 
-| 工作流 | 内容 |
+| Workflow | Contents |
 |---|---|
-| `virtuoso-ci.yml` | build / clippy（`-D warnings`）/ unit test；E2E 走自建 runner（openEuler 宿主 + KVM），手动 `workflow_dispatch` 触发，失败时上传 `target/runs/` 整体工件 |
-| `busybox-release.yml` | 三架构静态 BusyBox 预编译发布 GitHub Release；构建环境钉死 `ubuntu:22.04` 容器（busybox 1.36.1 的 tc applet 无法在内核头文件 ≥ 6.8 下编译，交叉 gcc 行为随发行版漂移）；交叉编译必须显式安装 `libc6-dev-<arch>-cross`（`--no-install-recommends` 会漏装） |
-| `kernel-builder.yml` | 发布容器化内核构建器镜像到 ghcr（`ghcr.io/yxalix/virtuoso-kernel`，linux/arm64 + linux/amd64 双基座）；devkit/docker/ 变更推 main 或手动 dispatch 触发；镜像纯为提速，拉不动时 forge 回落本地构建 |
-| `docs.yml` | mdBook 构建 docs/ → GitHub Pages（gh-pages） |
+| `virtuoso-ci.yml` | build / clippy (`-D warnings`) / unit tests; E2E runs on a self-hosted runner (openEuler host + KVM), triggered manually via `workflow_dispatch`; on failure it uploads the entire `target/runs/` artifact |
+| `busybox-release.yml` | Publishes prebuilt statically linked BusyBox for three architectures to a GitHub Release; the build environment is pinned to an `ubuntu:22.04` container (the tc applet of busybox 1.36.1 cannot compile against kernel headers ≥ 6.8, and cross-gcc behavior drifts across distros); cross-compilation requires explicitly installing `libc6-dev-<arch>-cross` (`--no-install-recommends` skips it) |
+| `kernel-builder.yml` | Publishes the containerized kernel builder image to ghcr (`ghcr.io/yxalix/virtuoso-kernel`, linux/arm64 + linux/amd64 dual base); triggered by devkit/docker/ changes pushed to main or by manual dispatch; the image exists purely for speed — when it cannot be pulled, forge falls back to a local build |
+| `docs.yml` | mdBook builds docs/ → GitHub Pages (gh-pages) |

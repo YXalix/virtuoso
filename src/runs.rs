@@ -1,13 +1,17 @@
-//! 运行工件（runs 领域）：运行目录（生命周期/保留策略）、输出泵、
-//! verdict.json 落盘/回读。
+//! Run artifacts (the runs domain): run directories (lifecycle/retention
+//! policy), the output pump, and verdict.json persistence/readback.
 //!
-//! 职责边界：
-//! - 本模块只做 **IO**；判定语义在 judge（标记协议解析 + verdict 判定 +
-//!   schema），本模块不重复实现；
-//! - verdict.json 的 schema 单点定义在 `crate::judge::VerdictReport`（此处
-//!   引用）；退出码语义单点在 `crate::judge`（EXIT_TIMEOUT/normalize）；
-//!   判定呈现单点在 `test` 收尾行 + `verdict.json`（机读唯一面），无第二
-//!   呈现命令。正常收尾与 Ctrl-C 兜底共用同一构造路径。
+//! Responsibility boundaries:
+//! - This module does **IO only**; judging semantics live in judge (marker
+//!   protocol parsing + verdict determination + schema) and are not
+//!   reimplemented here;
+//! - verdict.json's schema is defined in a single place,
+//!   `crate::judge::VerdictReport` (referenced here); exit code semantics
+//!   live solely in `crate::judge` (EXIT_TIMEOUT/normalize); verdict
+//!   presentation lives solely in the `test` closing line + `verdict.json`
+//!   (the sole machine-readable surface), with no second presentation
+//!   command. Normal finalization and the Ctrl-C fallback share the same
+//!   construction path.
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,7 +25,7 @@ use crate::judge::{Artifacts, Audit, Event, EventKind, VerdictReport};
 
 pub const RUNS_KEEP: usize = 20;
 
-// ---------------------------------------------------------------- 运行目录
+// ---------------------------------------------------------------- Run directories
 
 pub fn runs_root(project_root: &Path) -> PathBuf {
     project_root.join("target/runs")
@@ -32,7 +36,8 @@ pub struct RunDir {
     pub path: PathBuf,
 }
 
-/// 以 `<unix_ms>-<arch>` 建目录（定宽时间戳，目录名排序即时间排序）。
+/// Create a directory named `<unix_ms>-<arch>` (fixed-width timestamp;
+/// sorting directory names sorts by time).
 pub fn create_run_dir(project_root: &Path, arch: &str) -> anyhow::Result<RunDir> {
     let id = format!("{}-{arch}", unix_ms());
     let path = runs_root(project_root).join(&id);
@@ -54,33 +59,38 @@ pub fn list_run_dirs(project_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// 只保留最近 `keep` 次运行（目录名定宽时间戳，字典序即时间序）。
+/// Keep only the most recent `keep` runs (fixed-width timestamps in
+/// directory names; lexicographic order is time order).
 pub fn prune(project_root: &Path, keep: usize) {
     for stale in list_run_dirs(project_root).into_iter().skip(keep) {
         let _ = std::fs::remove_dir_all(stale);
     }
 }
 
-// ---------------------------------------------------------------- 输出泵
+// ---------------------------------------------------------------- Output pump
 
-/// 失败时回显的 QEMU stderr 尾部行数上限。
+/// Upper bound on QEMU stderr tail lines echoed on failure.
 pub const QEMU_TAIL_LINES: usize = 40;
 
-/// 两条输出流的分离呈现：guest 串口（stdout）逐行回显终端 + 落 serial.log；
-/// QEMU 自身输出（stderr）只落 qemu-stderr.log，不刷屏，仅保留尾部摘录，
-/// 运行失败时回显（QEMU 早夭/参数被拒的现场就在这几行里）。
+/// Separate presentation of the two output streams: the guest serial
+/// (stdout) is echoed to the terminal line by line and persisted to
+/// serial.log; QEMU's own output (stderr) goes only to qemu-stderr.log
+/// without flooding the screen — only a bounded tail excerpt is kept and
+/// echoed when the run fails (the scene of an early QEMU death or rejected
+/// args is right in those lines).
 #[derive(Debug)]
 pub struct PumpOutcome {
     pub status: ExitStatus,
-    /// QEMU stderr 总行数。
+    /// Total number of QEMU stderr lines.
     pub qemu_lines: usize,
-    /// 末尾至多 `QEMU_TAIL_LINES` 行（不含换行）。
+    /// At most the last `QEMU_TAIL_LINES` lines (without trailing newlines).
     pub qemu_tail: Vec<String>,
 }
 
 impl PumpOutcome {
-    /// 非零退出（失败/超时）且 QEMU 有输出时，把 stderr 尾部打到 stderr 侧；
-    /// 成功保持安静——全文在 qemu-stderr.log，verdict.json 的 artifacts 段给出路径。
+    /// On nonzero exit (failed/timeout) with QEMU output, print the stderr
+    /// tail to our stderr; on success stay quiet — the full text is in
+    /// qemu-stderr.log, whose path the verdict.json artifacts section records.
     pub fn report_tail_on_failure(&self, code: i32) {
         if code == 0 || self.qemu_lines == 0 {
             return;
@@ -101,8 +111,9 @@ impl PumpOutcome {
     }
 }
 
-/// 把已 spawn 的子进程两条流分开泵送（追加落盘；仅 stdout 回显终端）。
-/// 由 crate::launcher::QemuInvocation::spawn(piped=true) 提供子进程。
+/// Pump the two streams of an already spawned child separately (appended to
+/// disk; only stdout is echoed to the terminal).
+/// The child process is provided by crate::launcher::QemuInvocation::spawn(piped=true).
 pub fn pump_child(
     child: &mut Child,
     out_log: &Path,
@@ -135,7 +146,8 @@ pub fn pump_child(
         Ok(())
     }
 
-    // stderr：只落盘；尾部摘录进有界共享缓冲，供 PumpOutcome 带回。
+    // stderr: persisted only; the tail excerpt goes into a bounded shared
+    // buffer for PumpOutcome to carry back.
     fn pump_err(
         pipe: impl Read,
         log: &Path,
@@ -186,14 +198,15 @@ pub fn pump_child(
     })
 }
 
-// ---------------------------------------------------------------- 工件落盘/回读
+// ---------------------------------------------------------------- Artifact persistence/readback
 
 fn read_serial_audit(serial: &Path) -> Audit {
     let text = std::fs::read_to_string(serial).unwrap_or_default();
     crate::judge::parse(&text)
 }
 
-/// 运行结束后写 events.jsonl + verdict.json，返回 verdict 字符串。
+/// After a run finishes, write events.jsonl + verdict.json and return the
+/// verdict string.
 pub fn finalize_run(run: &RunDir, meta: &RunMeta) -> anyhow::Result<String> {
     let audit = read_serial_audit(&run.path.join("serial.log"));
     let verdict = meta.verdict_of(&audit);
@@ -231,15 +244,16 @@ pub fn finalize_run(run: &RunDir, meta: &RunMeta) -> anyhow::Result<String> {
     Ok(verdict.as_str().to_string())
 }
 
-// ---------------------------------------------------------------- 测试
+// ---------------------------------------------------------------- Tests
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
 
-    /// 起一个真实子进程分离泵送：stdout 进 out_log 并回显，stderr 只进
-    /// err_log，PumpOutcome 带回行数与尾部摘录。
+    /// Spawn a real child and pump its streams separately: stdout goes to
+    /// out_log and is echoed; stderr goes only to err_log; PumpOutcome
+    /// carries back the line count and tail excerpt.
     fn pump_shell(script: &str, out_log: &Path, err_log: &Path) -> PumpOutcome {
         let mut child = Command::new("/bin/sh")
             .arg("-c")

@@ -2,7 +2,7 @@
 name = "virtuoso-agent"
 version = "0.1.0"
 edition = "2021"
-description = "VM 内常驻 agent：virtio-serial 端口上的 JSON 行协议执行通道（AI probe 的 guest 侧）"
+description = "resident in-VM agent: a JSON-lines command channel over a virtio-serial port (guest side of the AI probe)"
 
 [dependencies]
 serde_json = "1"

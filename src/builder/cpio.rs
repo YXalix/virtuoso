@@ -1,13 +1,19 @@
-//! cpio newc 格式原生写入 —— `find | cpio -H newc | gzip` 管道的 Rust 接管。
+//! Native writer for the cpio newc format — Rust takeover of the
+//! `find | cpio -H newc | gzip` pipeline.
 //!
-//! 单路径跨平台（Linux/macOS 同码），消灭 GNU cpio 的 `--null` 平台差异与
-//! bash/find/gzip 外部依赖。写入约定与原管道对齐：
-//! - 条目名带 `./` 前缀（内核 initramfs 解包器以 cwd=/ 消费，形态同 find 输出）；
-//! - 符号链接存 target 文本（filesize = target 长度，mode S_IFLNK，权限位恒
-//!   0777——Linux symlink 恒 0777 而 macOS 应用 umask，symlink 权限本身无语义，
-//!   归一化才保证跨宿主字节一致）；
-//! - mtime/ino 无语义价值，恒写 0/递增序号 → **产物按内容确定性可复现**；
-//! - 目录条目 nlink=2、文件/链接 nlink=1（内核解包器不消费 nlink）。
+//! One code path across platforms (Linux/macOS share it), eliminating GNU
+//! cpio's `--null` platform differences and the bash/find/gzip external
+//! dependencies. Write conventions align with the original pipeline:
+//! - entry names carry the `./` prefix (the kernel initramfs unpacker
+//!   consumes with cwd=/, same shape as find output);
+//! - symlinks store the target text (filesize = target length, mode
+//!   S_IFLNK, permission bits always 0777 — Linux symlinks are always 0777
+//!   while macOS applies the umask; symlink permissions carry no semantics,
+//!   so normalizing is what guarantees byte-identical output across hosts);
+//! - mtime/ino carry no semantic value, always written as 0/an incrementing
+//!   sequence → **output is deterministically reproducible by content**;
+//! - directory entries nlink=2, files/links nlink=1 (the kernel unpacker
+//!   does not consume nlink).
 
 use std::fs::File;
 use std::io::Write;
@@ -15,11 +21,11 @@ use std::path::Path;
 
 use anyhow::Context;
 
-/// 把 `dir` 整树打包为 gzip 压缩的 newc cpio，写入 `out`。
+/// Packs the whole `dir` tree into a gzip-compressed newc cpio written to `out`.
 pub(crate) fn pack_dir_gzip(dir: &Path, out: &Path) -> anyhow::Result<()> {
     let mut entries: Vec<(String, std::fs::Metadata)> = Vec::new();
     collect_entries(dir, dir, &mut entries)?;
-    // 确定性：路径排序（GNU find 为 readdir 序，内容等价、顺序不构成契约）
+    // Determinism: sort by path (GNU find is readdir order; content-equivalent, order is not part of the contract)
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let out_file = File::create(out).with_context(|| format!("create {} failed", out.display()))?;
@@ -29,8 +35,10 @@ pub(crate) fn pack_dir_gzip(dir: &Path, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 递归收集 `root` 下全部条目（含符号链接本体，不跟随），名为相对 root 的
-/// `./`-前缀路径（`.` 根条目本身跳过，与 find 输出差异不影响解包）。
+/// Recursively collects all entries under `root` (symlinks themselves
+/// included, not followed), named as `./`-prefixed paths relative to root
+/// (the `.` root entry itself is skipped; this difference from find output
+/// does not affect unpacking).
 fn collect_entries(
     root: &Path,
     dir: &Path,
@@ -62,12 +70,12 @@ const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
 
-/// 4 字节对齐（newc 的头/数据段边界规则）。
+/// 4-byte alignment (newc header/data segment boundary rule).
 fn align4(n: usize) -> usize {
     n + (4 - n % 4) % 4
 }
 
-/// 逐条目写 newc 流 + TRAILER!!!。
+/// Writes the newc stream entry by entry plus TRAILER!!!.
 fn write_stream<W: Write>(
     entries: &[(String, std::fs::Metadata)],
     root: &Path,
@@ -86,7 +94,7 @@ fn write_stream<W: Write>(
         let rel = Path::new(name).strip_prefix(".").unwrap_or(Path::new(name));
         match ftype {
             S_IFLNK => {
-                // 符号链接：数据段 = target 路径文本
+                // Symlink: data segment = target path text
                 let target = std::fs::read_link(root.join(rel))
                     .with_context(|| format!("readlink {name} failed"))?;
                 write_data(w, target.as_os_str().as_encoded_bytes())?;
@@ -96,18 +104,19 @@ fn write_stream<W: Write>(
                     std::fs::read(root.join(rel)).with_context(|| format!("read {name} failed"))?;
                 write_data(w, &data)?;
             }
-            _ => {} // 目录无数据段
+            _ => {} // directories have no data segment
         }
     }
     write_header(w, "TRAILER!!!", 0, 0, 1, 0)?;
-    // 尾部补齐到 512（惯例；内核解包器遇 TRAILER!!! 即停）
+    // Pad the tail to 512 (convention; the kernel unpacker stops at TRAILER!!!)
     let pad = 512 - align4(110 + "TRAILER!!!".len() + 1);
     w.write_all(&vec![0u8; pad])?;
     Ok(())
 }
 
-/// newc 头（110 字节 ASCII）：magic + 13 个 8 位十六进制字段。
-/// uid/gid/mtime/设备号恒 0（内核解包器以 root 身份消费，不读这些字段）。
+/// newc header (110-byte ASCII): magic + 13 eight-digit hex fields.
+/// uid/gid/mtime/device numbers are always 0 (the kernel unpacker consumes
+/// as root and does not read these fields).
 fn write_header<W: Write>(
     w: &mut W,
     name: &str,
@@ -116,7 +125,7 @@ fn write_header<W: Write>(
     nlink: u64,
     size: u64,
 ) -> anyhow::Result<()> {
-    let namesize = name.len() + 1; // 含 NUL
+    let namesize = name.len() + 1; // includes NUL
     let fields = [
         ino,
         mode as u64,
@@ -140,7 +149,7 @@ fn write_header<W: Write>(
     w.write_all(hdr.as_bytes())?;
     w.write_all(name.as_bytes())?;
     w.write_all(&[0])?;
-    // 头 + 名字补齐到 4 字节边界（newc 对齐规则）
+    // Pad header + name to the 4-byte boundary (newc alignment rule)
     let pad = (4 - (110 + namesize) % 4) % 4;
     w.write_all(&vec![0u8; pad])?;
     Ok(())
@@ -173,7 +182,7 @@ mod tests {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    /// 解析出 (name, mode, size, data) 序列（对齐规则与写入侧镜像）。
+    /// Parses out the (name, mode, size, data) sequence (alignment mirrors the writer side).
     fn parse(cpio: &[u8]) -> Vec<(String, u32, u64, Vec<u8>)> {
         let mut out = Vec::new();
         let mut i = 0usize;
@@ -189,7 +198,7 @@ mod tests {
             };
             let mode = hex(1) as u32;
             let size = hex(6);
-            let namesize = hex(11) as usize - 1; // 去 NUL
+            let namesize = hex(11) as usize - 1; // strip NUL
             let name = String::from_utf8(cpio[i + 110..i + 110 + namesize].to_vec()).unwrap();
             if name == "TRAILER!!!" {
                 break;
@@ -210,11 +219,11 @@ mod tests {
         let out = dir.join("initrd.img");
         pack_dir_gzip(&dir, &out).unwrap();
 
-        // gzip 魔数
+        // gzip magic
         let raw = std::fs::read(&out).unwrap();
         assert_eq!(&raw[..2], &[0x1f, 0x8b]);
 
-        // 解压后逐条断言
+        // Assert entry by entry after decompression
         let mut dec = flate2::read::GzDecoder::new(&raw[..]);
         let mut cpio = Vec::new();
         std::io::Read::read_to_end(&mut dec, &mut cpio).unwrap();
@@ -231,13 +240,14 @@ mod tests {
         for expect in ["./bin", "./bin/busybox", "./init", "./lib", "./lib/modules"] {
             assert!(
                 entries.iter().any(|(name, ..)| name == expect),
-                "缺 {expect}"
+                "missing {expect}"
             );
         }
     }
 
-    /// 确定性：同树两次打包字节一致（mtime 恒 0 + 路径排序）。
-    /// 输出放在树外——写进树内会被下一次收集吞进去。
+    /// Determinism: two packs of the same tree are byte-identical (mtime
+    /// always 0 + path sort).
+    /// Outputs go outside the tree — writing inside would be swallowed by the next collection.
     #[test]
     fn pack_is_deterministic() {
         let base = std::env::temp_dir().join(format!("cpio-det-{}", std::process::id()));
@@ -248,8 +258,8 @@ mod tests {
         let a = base.join("a.img");
         let b = base.join("b.img");
         pack_dir_gzip(&dir, &a).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1100)); // 跨秒界
-        set_mode(&dir.join("init"), 0o755); // 触发 mtime 变化
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // cross a second boundary
+        set_mode(&dir.join("init"), 0o755); // trigger an mtime change
         pack_dir_gzip(&dir, &b).unwrap();
         assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
     }

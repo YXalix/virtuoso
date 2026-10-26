@@ -1,132 +1,163 @@
 # =====================================================================
-# Virtuoso VM 配置 —— 唯一配置面
+# Virtuoso VM configuration — the single configuration surface
 # =====================================================================
-# 解析规则：
-#   * 未知键 / 非法类型在解析期报错（deny_unknown_fields）；
-#   * 标量键优先级：进程环境变量 > 本文件（同名键 env 覆盖 toml，便于
-#     CI/命令行临时改参不动文件；持久配置写这里）；
-#   * 活动行 = 默认常规启动配置；注释行 = 可选项，取消注释即生效。
+# Parsing rules:
+#   * Unknown keys / invalid types error out at parse time (deny_unknown_fields);
+#   * Scalar key precedence: process environment variables > this file (env
+#     overrides toml for the same key, so CI/command-line tweaks don't touch
+#     the file; persistent configuration lives here);
+#   * Uncommented lines = the default regular launch configuration; commented
+#     lines = optional items, uncomment to take effect.
 #
-# 组件化：每个 [components.*] 段是一个 VM 组件，`require` 声明它依赖的
-# 内核模块（.ko）。builder 按「启用组件的 require 并集」生成 rootfs 的
-# /lib/modules/modules.conf（switch_root 后由 init 逐行 insmod；缺 .ko
-# 构建期报错）。require 条目格式沿用 conf 行："<module> [key=val ...]"，
-# 首 token 是模块名（去重键），其余原样传给 insmod；需要 initramfs 阶段
-# （挂 root 前）加载的组件加 stage = "boot"，缺省 "runtime"。
+# Componentization: each [components.*] section is one VM component, and its
+# `require` declares the kernel modules (.ko) it depends on. The builder
+# generates the rootfs /lib/modules/modules.conf from the union of requires
+# of enabled components (init insmods them line by line after switch_root;
+# a missing .ko errors at build time). require entries reuse the conf line
+# format: "<module> [key=val ...]" — first token is the module name (dedup
+# key), the rest are passed to insmod verbatim. Components that must load
+# before root mount go in the initramfs stage get stage = "boot"; the default
+# is "runtime".
 
-# ---------------------------------------------------------------- 全局
+# ---------------------------------------------------------------- Global
 
-# 目标架构：x86_64 | arm64 | riscv64（决定 QEMU 二进制 / 内核镜像 / console）
+# Target architecture: x86_64 | arm64 | riscv64 (picks the QEMU binary /
+# kernel image / console)
 arch = "arm64"
 
-# 测试墙钟超时秒数；0 一律拒绝
+# Test wall-clock timeout in seconds; 0 is always rejected
 timeout_secs = 60
 
-# vCPU 总数（NUMA 多节点时须被节点数整除，解析期校验）
+# Total vCPUs (must be divisible by node count under NUMA; checked at parse)
 smp = 8
 
-# 测试模式（kernel cmdline auto_test）；false = 交互引导不自动跑测试
+# Test mode (kernel cmdline auto_test); false = interactive boot, no auto test run
 auto_test = true
 
-# 内核源码树（构建期从内核树找 .ko / 内核镜像）。缺省 = 项目根上一级。
-# docker 模式下被活动卷覆盖：解析序 = env KERNEL_PATH > `kernel use/clone`
-# 写的 current 活动卷 > 本键 > 缺省。本键只在 raw 模式（无活动卷）生效。
+# Kernel source tree (build time looks for .ko / kernel images in it).
+# Default = parent directory of the project root. In docker mode this is
+# overridden by the active volume: resolution order = env KERNEL_PATH > the
+# current active volume written by `kernel use/clone` > this key > default.
+# This key only takes effect in raw mode (no active volume).
 kernel_path = "/root/kernel"
 
-# 内核镜像覆盖（缺省 = 内核树内 arch 对应镜像）
+# Kernel image override (default = the arch-matching image inside the kernel tree)
 # kernel_image = "/path/to/Image"
 
-# docker 模式（容器化内核供给，devkit/docker/ 工具链镜像）：内核源码存 named
-# volume，`virtuoso kernel clone/defconfig/build` 进树干活，build/test/doctor
-# 的内核树自动跟随活动卷（解析序 = env KERNEL_PATH > current 活动卷 > 上面的
-# kernel_path 键）。不占 toml 键——临时覆盖走环境变量：
-#   KERNEL_VOLUME            活动卷覆盖（current 状态文件 .virtuoso/kernel-current.json 之上）
-#   KERNEL_ARCH              目标架构覆盖（缺省 = 顶层 arch）
-#   KERNEL_REF               clone 缺省 ref（缺省 master）
-#   KERNEL_TOOLCHAIN_IMAGE   工具链镜像（缺省 ghcr.io/yxalix/virtuoso-kernel:latest；
-#                            注意 KERNEL_IMAGE 已被 kernel_image 占用，与此无关）
+# Docker mode (containerized kernel provisioning, devkit/docker/ toolchain
+# image): kernel sources live in a named volume, `virtuoso kernel
+# clone/defconfig/build` work inside the tree, and the kernel tree used by
+# build/test/doctor follows the active volume automatically (resolution order
+# = env KERNEL_PATH > current active volume > the kernel_path key above).
+# No toml key — temporary overrides go through environment variables:
+#   KERNEL_VOLUME            active volume override (on top of the current
+#                            state file .virtuoso/kernel-current.json)
+#   KERNEL_ARCH              target arch override (default = top-level arch)
+#   KERNEL_REF               default clone ref (default master)
+#   KERNEL_TOOLCHAIN_IMAGE   toolchain image (default
+#                            ghcr.io/yxalix/virtuoso-kernel:latest; note
+#                            KERNEL_IMAGE is already taken by kernel_image
+#                            and is unrelated)
 
-# QEMU 二进制覆盖（等价旧 QEMU= 语义）
+# QEMU binary override (equivalent to the legacy QEMU= semantics)
 # qemu = "qemu-system-aarch64"
 
-# 内核 cmdline 追加段（env CMDLINE_EXTRA 同名覆盖）：原样整串拼在机器拼装
-# 基线之后（空缺省 = 基线不变）。内核参数 last-wins，追加即覆盖——调试旋钮
-# 不用重编本 crate（console= 例外：注册第二控制台，后者成 preferred）。
+# Kernel cmdline append segment (env CMDLINE_EXTRA overrides the same key):
+# appended verbatim after the machine-assembled baseline (empty default =
+# baseline unchanged). Kernel params are last-wins, so appending overrides —
+# debug knobs without rebuilding this crate (console= is the exception: it
+# registers a second console, and the later one becomes preferred).
 # cmdline_extra = "nokaslr initcall_debug loglevel=4"
 
-# QEMU 透传兜底（数组，逐项透传；vfio 直通优先用组件，见下）
+# QEMU passthrough fallback (array, passed through item by item; prefer the
+# component for vfio passthrough, see below)
 # qemu_opts = ["-device ivshmem-plain,memdev=hostmem"]
 
-# ------------------------------------------------------------- VM 组件
+# ------------------------------------------------------------- VM components
 
 [components.tools_disk]
-# tools.img 常驻工具盘：外挂 virtio-blk → guest 内 /dev/vdb 挂 /tools，
-# 工具目录注入 PATH。段缺省（整段注释）= 启用；tools.img 未构建则自动跳过。
+# tools.img resident tool disk: attached as virtio-blk → mounted at /tools
+# from /dev/vdb inside the guest, tool directory injected into PATH. Section
+# default (whole section commented) = enabled; skipped automatically when
+# tools.img has not been built.
 enabled = true
-# require = ["virtio_blk", "ext4"]   # 已在 boot 基础集，声明仅为文档
+# require = ["virtio_blk", "ext4"]   # already in the boot base set; declared for documentation only
 
 # [components.agent]
-# AI probe 通道：virtio-serial 端口 + guest 内 virtuoso-agent（virtuoso
-# probe 恒开本通道，不依赖此开关）。启用后 shell/test 也附加通道，
-# virtio_console.ko 随本组件进 rootfs。段缺省 = 关闭（argv 保持冻结基线）。
+# AI probe channel: virtio-serial port + in-guest virtuoso-agent (virtuoso
+# probe always uses this channel, independent of this switch). When enabled,
+# shell/test also attach the channel, and virtio_console.ko goes into the
+# rootfs with this component. Section default = off (argv stays at the frozen
+# baseline).
 # enabled = true
 # require = ["virtio_console"]
 
 # [components.vfio]
-# vfio-pci 直通：devices 逐条生成 -device vfio-pci,host=<bdf>。
-# 仅 Linux 宿主（需 KVM + IOMMU）；macOS 上启用会被 doctor/verify 拒绝。
+# vfio-pci passthrough: devices generates one -device vfio-pci,host=<bdf> each.
+# Linux hosts only (needs KVM + IOMMU); enabling on macOS is rejected by
+# doctor/verify.
 # enabled = true
 # devices = ["0000:01:00.0"]
-# require = ["vfio", "vfio_pci"]     # guest 侧驱动，按被测内核配置取舍
-# stage = "boot"                     # 需要引导早期可用时才改 boot
+# require = ["vfio", "vfio_pci"]     # guest-side drivers, choose per kernel-under-test config
+# stage = "boot"                     # change to boot only when early-boot availability is needed
 
 # [components.numa]
-# 多节点 NUMA 拓扑（缺省单节点，无 -numa 参数）。总内存 = memory_per_node
-# × nodes；smp 必须被 nodes 整除。
+# Multi-node NUMA topology (default single node, no -numa args). Total memory
+# = memory_per_node × nodes; smp must be divisible by nodes.
 # enabled = true
 # nodes = 2
 # memory_per_node = "1G"
 
 # [components.pmem]
-# 持久内存（DT 途径，arm64/riscv64）：设备树注入 pmem-region 节点（cli 用
-# dumpdtb+fdtput 生成补丁 DTB，经 -dtb 传入），cmdline 追加 mem=<总内存−size>
-# 把 pmem 区从内核线性内存排除（等价 x86 memmap= 语义），主内存后端换宿主
-# 文件（share=on）—— pmem 区即文件 backed，guest 写入持久落盘。guest 内
-# of_pmem 免 ndctl 注册 /dev/pmem0（DAX=1，mkfs 后 mount -o dax 即 fsdax）。
-# size = pmem 区大小（缺省 "256M"，2MiB 对齐、须小于总内存）；段缺省 = 关闭
-# （argv 保持冻结基线）。注意：QEMU nvdimm 的 ACPI NFIT 在 arm64 直启下不可见
-# （需 EFI 引导）；x86_64 途径另行支持。
+# Persistent memory (DT route, arm64/riscv64): a pmem-region node is injected
+# into the device tree (the cli generates a patched DTB via dumpdtb+fdtput,
+# passed in with -dtb), the cmdline appends mem=<total−size> to exclude the
+# pmem region from kernel linear memory (equivalent to x86 memmap= semantics),
+# and the main memory backend switches to a host file (share=on) — the pmem
+# region is file-backed, so guest writes persist to disk. In-guest of_pmem
+# registers /dev/pmem0 without ndctl (DAX=1; mkfs then mount -o dax gives
+# fsdax). size = pmem region size (default "256M", 2MiB aligned, must be
+# smaller than total memory); section default = off (argv stays at the frozen
+# baseline). Note: QEMU nvdimm's ACPI NFIT is not visible under arm64 direct
+# boot (needs EFI boot); the x86_64 route is supported separately.
 # enabled = true
 # size = "256M"
-# require = ["libnvdimm", "nd_btt", "of_pmem", "nd_pmem"]  # 内核 =m 时声明（含加载顺序）
-# stage = "runtime"                              # rootfs 阶段加载（缺省）
+# require = ["libnvdimm", "nd_btt", "of_pmem", "nd_pmem"]  # declare when kernel has =m (includes load order)
+# stage = "runtime"                              # loaded at the rootfs stage (default)
 
 # [components.bpf]
-# bpf 观测组件：bpftrace（官方 Release AppImage，自含 Nix 闭包）随 tools 盘
-# 供给，/tools/bin/bpftrace 直跑（PATH 已注入）。解包在 build 期容器内完成
-# （需 docker，与 kernel 供给同依赖），VM 内零解包。内核侧要求 BPF/BTF
-# （openEuler defconfig 缺省即开）。启用后 tools.img 增至 ~600M；首次构建
-# 下载 ~190M 并解包，之后缓存复用。段缺省 = 关闭。
-# 注意 bpftool / bpf-run 与本开关无关、常驻 /bin：bpftool 由 `virtuoso
-# kernel build` 从内核树静态构建（in-tree libbpf 链入），本开关只门控
-# bpftrace。
+# bpf observability component: bpftrace (official Release AppImage, self-
+# contained Nix closure) is provisioned with the tools disk and runs directly
+# at /tools/bin/bpftrace (PATH already injected). Unpacking happens inside
+# the container at build time (needs docker, same dependency as kernel
+# provisioning); zero unpacking inside the VM. Kernel side requires BPF/BTF
+# (on by default in the openEuler defconfig). Enabling grows tools.img to
+# ~600M; the first build downloads ~190M and unpacks, afterwards the cache is
+# reused. Section default = off.
+# Note bpftool / bpf-run are unrelated to this switch and always resident in
+# /bin: bpftool is built statically from the kernel tree by `virtuoso kernel
+# build` (links the in-tree libbpf); this switch only gates bpftrace.
 # enabled = true
 
-# ------------------------------------------------------------- 测例
+# ------------------------------------------------------------- Test cases
 
 # [tests]
-# 测例套件的内核模块依赖：给内核特性写测例时，被测模块（优先 =m 免内核
-# 重建）声明的自然归属，不必挂到无关组件上。条目格式与组件 require 一致
-# （"<module> [key=val ...]"，首 token 是模块名/去重键，其余原样传 insmod），
-# 恒 runtime 阶段（测例都在 pivot 后跑）；同名模块组件条目优先，这里只补差集。
+# Kernel module dependencies of the test suite: when writing test cases for a
+# kernel feature, the natural home for the modules under test (prefer =m to
+# avoid kernel rebuilds) — no need to hang them on unrelated components.
+# Entry format matches component require ("<module> [key=val ...]", first
+# token is the module name/dedup key, the rest passed to insmod verbatim),
+# always runtime stage (test cases run after pivot); component entries for
+# the same module win, this only supplies the difference.
 # require = ["overlay", "kvm"]
 
-# ------------------------------------------------------------- 供给链
+# ------------------------------------------------------------- Supply chain
 
 # [busybox]
-# 静态 busybox 统一由 GitHub Release 供给（见
-# .github/workflows/busybox-release.yml）：下载命中即缓存 target/build 复用，
-# 无本地源码编译，全部未命中（未配仓库/断网）直接报错。
+# Static busybox is provisioned uniformly from a GitHub Release (see
+# .github/workflows/busybox-release.yml): downloads hit the cache under
+# target/build for reuse, no local source builds, and an all-miss (repo not
+# configured / offline) errors out directly.
 # version = "1.36.1"
-# release_repo = "owner/repo"        # 发布 busybox-v* 的仓库（owner/repo；缺省扫 git remotes）
-# dl_url = "https://example.com/busybox"   # 或直接给资产 URL
+# release_repo = "owner/repo"        # repo publishing busybox-v* (owner/repo; default scans git remotes)
+# dl_url = "https://example.com/busybox"   # or give the asset URL directly

@@ -1,17 +1,20 @@
-//! tools workspace 装载：VM 内常驻工具（std Rust + musl 静态）→ tools.img
-//! 的 `/bin/`（外挂 virtio-blk 数据盘，挂 /tools 后由 PATH 引用）。
+//! tools workspace install: VM-resident tools (std Rust + musl static) →
+//! tools.img `/bin/` (an attached virtio-blk data disk, mounted at /tools
+//! and referenced via PATH).
 //!
-//! 与 testcases 分类正交：工具不进 `/tests`、不被 init 自动发现、不参与
-//! 标记协议判定。构建走 `cargo build --release --target <arch musl triple>`
-//! （见 `Arch::rust_musl_triple`）；musl crt-static 自含链接，产物为无动态
-//! 依赖的静态 ELF —— VM 无动态加载器/无动态库的事实不变。
+//! Orthogonal to test case grouping: tools do not go into `/tests`, are not
+//! auto-discovered by init, and take no part in marker protocol judging.
+//! Build via `cargo build --release --target <arch musl triple>` (see
+//! `Arch::rust_musl_triple`); musl crt-static self-contained linking
+//! produces static ELF without dynamic dependencies — the fact that the VM
+//! has no dynamic loader/dynamic libraries is unchanged.
 //!
-//! 降级规则（显式 WARN，不是吞错；构建失败仍 bail）：
-//! - `tools/` 目录缺失 → 静默跳过（未采用 tools 的项目不受影响）；
-//! - cargo 缺失或 musl target 未随 toolchain 安装 → WARN 跳过。
+//! Degradation rules (explicit WARN, not swallowed errors; build failure still bails):
+//! - missing `tools/` directory → silently skipped (projects not using tools are unaffected);
+//! - cargo missing or musl target not installed with the toolchain → WARN and skip.
 //!
-//! 返回 `Ok(true)` = 有工具装入（此时才产出 tools.img 与挂载 hook）；
-//! `Ok(false)` = 按上述规则跳过。
+//! Returns `Ok(true)` = tools installed (only then are tools.img and the
+//! mount hook produced); `Ok(false)` = skipped per the rules above.
 
 use std::path::Path;
 
@@ -34,12 +37,13 @@ pub(crate) fn install(
         item_prefix: "  Tool:",
         groups: None,
     };
-    // 返回 0 = workspace 缺失或显式 WARN 降级（cargo/musl target 缺失）；
-    // 构建成功但零产物由 CargoInstall::run 内部 bail。
+    // Returns 0 = workspace missing or explicit WARN degradation (cargo/musl
+    // target missing); build success with zero binaries is bailed inside
+    // CargoInstall::run.
     Ok(job.run(progress)? > 0)
 }
 
-/// musl target 是否已随 toolchain 安装（sysroot 的 rustlib 目录存在即视为可用）。
+/// Whether the musl target is installed with the toolchain (the sysroot's rustlib directory existing counts as available).
 pub(crate) fn musl_target_installed(triple: &str) -> bool {
     let out = std::process::Command::new("rustc")
         .args(["--print", "target-libdir", "--target", triple])
@@ -59,9 +63,9 @@ mod tests {
 
     #[test]
     fn musl_target_check_reflects_install_state() {
-        // 本机装了 aarch64 musl（手装 rust-std），x86_64 未装 —— 两个方向都要覆盖
+        // This machine has aarch64 musl installed (manual rust-std), x86_64 not — both directions must be covered
         let aarch64 = musl_target_installed("aarch64-unknown-linux-musl");
         let x86_64 = musl_target_installed("x86_64-unknown-linux-musl");
-        assert!(aarch64 || x86_64, "至少一个 musl target 应可用");
+        assert!(aarch64 || x86_64, "at least one musl target should be available");
     }
 }

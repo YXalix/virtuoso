@@ -1,38 +1,46 @@
-//! coda-scaffold — 用例 build.rs 的脚手架（coda 测试框架的配套 build-dep）。
+//! coda-scaffold — scaffold for test case build.rs files (build-dep
+//! companion to the coda test framework).
 //!
-//! 每个用例 crate 的 build.rs 固定一行：
+//! Every test case crate's build.rs is fixed at one line:
 //!
 //! ```ignore
 //! fn main() { coda_scaffold::run() }
 //! ```
 //!
-//! 职责：把用例 `c/*.c` 编入本用例二进制（C over Rust），并把解析出的
-//! 编译命令写成 crate 根的 `compile_commands.json`（gitignore）供 clangd。
-//! `c/` 缺失或为空时编入一个空桩 `run_c_tests`——C 段符号恒存在，
-//! `coda::run_and_exit` 无条件调用也不缺链。
+//! Responsibilities: compile the test case's `c/*.c` into the test binary
+//! (C over Rust), and write the resolved compile commands to the crate
+//! root's `compile_commands.json` (gitignored) for clangd. When `c/` is
+//! missing or empty, an empty `run_c_tests` stub is compiled in — the C
+//! section symbol always exists, so `coda::run_and_exit` can call it
+//! unconditionally without a link error.
 //!
-//! 编译器选择是显式单路径：`CC_<TRIPLE>`（builder::cross 注入的 zig cc
-//! 包装）→ `CC_<triple 连字符>` → `TARGET_CC` → `CC` → 交回 cc crate 宿主
-//! 缺省。**交叉构建（TARGET != HOST）且没有任何 CC 接管时 fail-fast**——
-//! 防 cc crate 静默落到 host cc，编出 glibc 目标码混链 musl libc（ABI
-//! 风险），这正是统一 zig 的理由。
+//! Compiler selection is one explicit path: `CC_<TRIPLE>` (the zig cc
+//! wrapper injected by builder::cross), then `CC_<triple with hyphens>`,
+//! then `TARGET_CC`, then `CC`, then the cc crate's host default. **Cross
+//! builds (TARGET != HOST) with no CC takeover fail fast** — this prevents
+//! the cc crate from silently falling back to the host cc and producing
+//! glibc object code linked against musl libc (an ABI hazard); that is
+//! exactly why zig is unified here.
 //!
-//! 约定：用例 crate 是 `infra/testcases/` 的直接子目录（coda 在
-//! `../coda/include`）。对象直链（rustc-link-arg-bins），不走 cc 的
-//! compile()：交叉场景下宿主 ar/ranlib 给 ELF 目码建不了符号索引（macOS
-//! 实测 undefined symbol），命令行对象文件则被链接器无条件接纳，无此问题。
+//! Convention: test case crates are direct subdirectories of
+//! `infra/testcases/` (coda lives in `../coda/include`). Objects are linked
+//! directly (rustc-link-arg-bins) instead of going through cc's compile():
+//! in cross scenarios the host ar/ranlib cannot build a symbol index for
+//! ELF objects (undefined symbol observed on macOS), while command-line
+//! object files are accepted unconditionally by the linker, with no such
+//! problem.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-/// 用例 build.rs 入口（读 CARGO_MANIFEST_DIR / TARGET / HOST 等 build
-/// script 环境变量）。
+/// Entry point for a test case build.rs (reads CARGO_MANIFEST_DIR / TARGET /
+/// HOST and the other build script env vars).
 pub fn run() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace = manifest
         .parent()
-        .expect("crate 目录必有父目录")
+        .expect("crate dir always has a parent")
         .to_path_buf();
     let pkg = env::var("CARGO_PKG_NAME").unwrap_or_default();
     let target = env::var("TARGET").unwrap_or_default();
@@ -44,9 +52,9 @@ pub fn run() {
     let compiler = compiler_env(&target);
     if cross && compiler.is_none() {
         let upper = target.to_uppercase().replace('-', "_");
-        eprintln!("{pkg} build.rs: 交叉构建 {target} 需要 C 编译器接管（CC_{upper}）");
-        eprintln!("  正常路径：`virtuoso build`（builder 注入 zig cc 包装）");
-        eprintln!("  自带工具链：CC_{upper}=<cross-cc>");
+        eprintln!("{pkg} build.rs: cross build {target} needs a C compiler takeover (CC_{upper})");
+        eprintln!("  normal path: `virtuoso build` (builder injects the zig cc wrapper)");
+        eprintln!("  own toolchain: CC_{upper}=<cross-cc>");
         exit(1);
     }
 
@@ -57,7 +65,8 @@ pub fn run() {
     build.warnings(true).include(&c_dir).include(&coda_include);
 
     let sources = c_sources(&c_dir);
-    // 目录级 rerun：覆盖增/删/改（逐文件粒度反而漏掉"新增 .c 不重编译"）
+    // Directory-level rerun: covers add/remove/modify (per-file granularity
+    // would instead miss "newly added .c not recompiled")
     println!("cargo:rerun-if-changed={}", c_dir.display());
     println!(
         "cargo:rerun-if-changed={}",
@@ -67,12 +76,13 @@ pub fn run() {
         build.file(src);
     }
     if sources.is_empty() {
-        // 空桩：无 C 段的用例由桩兜住 run_c_tests 符号
+        // Empty stub: for test cases without a C section, the stub holds the
+        // run_c_tests symbol
         let stub = PathBuf::from(env::var("OUT_DIR").unwrap()).join("coda_c_stub.c");
-        std::fs::write(&stub, "void run_c_tests(void) {}\n").expect("写 OUT_DIR 失败");
+        std::fs::write(&stub, "void run_c_tests(void) {}\n").expect("failed to write OUT_DIR");
         build.file(&stub);
     }
-    // 对象直链：见模块 doc 的 ar/ranlib 理由
+    // Link objects directly: see the module docs for the ar/ranlib rationale
     for obj in &build.compile_intermediates() {
         println!("cargo:rustc-link-arg-bins={}", obj.display());
     }
@@ -80,8 +90,9 @@ pub fn run() {
     write_compile_commands(&manifest, &c_dir, &coda_include, compiler.as_deref());
 }
 
-/// cc crate 同序的编译器环境探测（显式化，不依赖 cc 内部解析细节）：
-/// 目标专属键优先，再退全局键。
+/// Compiler env probing in the cc crate's order, made explicit (no reliance
+/// on cc's internal resolution): target-specific keys first, then global
+/// keys.
 fn compiler_env(target: &str) -> Option<PathBuf> {
     [
         format!("CC_{}", target),
@@ -106,20 +117,22 @@ fn c_sources(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// 把本次 C 编译的条目写成 crate 根 `compile_commands.json`。
-/// 条目是给 clangd 的最小形态（编译器 + include + -std），不必与 cc
-/// crate 的完整 argv 逐字一致。clangd 沿源文件祖先目录取最近的 CDB，
-/// 按 crate 天然路由，多用例并行构建各写各的、无共享写点。
-/// rust-analyzer 触发的 host check 生成 host 版，恰是 IDE 想要的形态；
-/// 旧版写 workspace 根的共享 CDB（后建 crate 整文件覆写先建 crate 的
-/// 条目）已退役，这里清掉存量。
+/// Write this C compilation's entries to the crate root `compile_commands.json`.
+/// Entries are the minimal form clangd needs (compiler + includes + -std);
+/// they need not match the cc crate's full argv verbatim. clangd picks the
+/// nearest CDB walking up from the source file, routing naturally per crate:
+/// parallel test case builds each write their own file, no shared write
+/// point. Host checks triggered by rust-analyzer produce a host variant,
+/// exactly the shape the IDE wants; the previous scheme (a shared CDB at the
+/// workspace root, where later crates overwrote earlier crates' entries
+/// wholesale) is retired, and stale files are cleaned up here.
 fn write_compile_commands(
     manifest: &Path,
     c_dir: &Path,
     coda_include: &Path,
     compiler: Option<&Path>,
 ) {
-    let workspace = manifest.parent().expect("crate 必有父目录");
+    let workspace = manifest.parent().expect("crate always has a parent");
     let _ = std::fs::remove_file(workspace.join("compile_commands.json"));
 
     let sources = c_sources(c_dir);
@@ -157,7 +170,8 @@ fn write_compile_commands(
     let _ = std::fs::write(&out, format!("[{}]\n", entries.join(",\n")));
 }
 
-/// 极简 JSON 字符串转义（路径与编译器命令不含控制字符，够用）。
+/// Minimal JSON string escaping (paths and compiler commands contain no
+/// control characters; this suffices).
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

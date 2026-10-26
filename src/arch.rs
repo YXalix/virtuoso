@@ -1,6 +1,7 @@
-//! 目标架构矩阵与宿主平台 —— 原 3 个 shell 脚本里散落表格的唯一事实来源。
+//! Target arch matrix and host platform — the single source of truth replacing
+//! the tables scattered across the original 3 shell scripts.
 
-/// 目标架构。
+/// Target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Arch {
     Arm64,
@@ -9,7 +10,7 @@ pub(crate) enum Arch {
 }
 
 impl Arch {
-    /// 与 verify.sh / run-qemu.sh 相同的别名归一逻辑。
+    /// Same alias normalization logic as verify.sh / run-qemu.sh.
     pub(crate) fn parse(s: &str) -> Option<Arch> {
         match s {
             "aarch64" | "arm64" => Some(Arch::Arm64),
@@ -19,7 +20,7 @@ impl Arch {
         }
     }
 
-    /// 宿主机架构（脚本中的 `uname -m` 等价物）。
+    /// Host architecture (the `uname -m` equivalent from the scripts).
     pub(crate) fn host_default() -> Option<Arch> {
         Self::parse(std::env::consts::ARCH)
     }
@@ -40,7 +41,7 @@ impl Arch {
         }
     }
 
-    /// 相对内核树的镜像路径。
+    /// Kernel image path relative to the kernel tree.
     pub(crate) fn kernel_img(self) -> &'static str {
         match self {
             Arch::Arm64 => "arch/arm64/boot/Image",
@@ -56,14 +57,15 @@ impl Arch {
         }
     }
 
-    /// machine 类型。**冻结基线（原 run-qemu.sh 行为）：三架构一律 `virt`**
-    /// （脚本从未使用 q35；此处保留单一入口，将来引入 q35 只改这里）。
+    /// Machine type. **Frozen baseline (original run-qemu.sh behavior):
+    /// `virt` for all three arches** (the scripts never used q35; this stays
+    /// the single entry point — introducing q35 later only changes here).
     #[allow(unused_variables)]
     pub(crate) fn machine(self) -> &'static str {
         "virt"
     }
 
-    /// TCG 模式下的 CPU 型号（run-qemu.sh 的 CPU_TCG 列）。
+    /// CPU model under TCG (the CPU_TCG column of run-qemu.sh).
     pub(crate) fn cpu_tcg(self) -> &'static str {
         match self {
             Arch::Arm64 => "cortex-a72",
@@ -72,8 +74,9 @@ impl Arch {
         }
     }
 
-    /// Rust 静态 musl target triple（tools workspace 构建用；crt-static 自含
-    /// 链接，产物为无动态依赖的静态 ELF —— VM 无动态加载器的对齐选择）。
+    /// Rust static musl target triple (for building the tools workspace;
+    /// crt-static links self-contained, producing a static ELF with no
+    /// dynamic dependencies — aligned with the VM having no dynamic loader).
     pub(crate) fn rust_musl_triple(self) -> &'static str {
         match self {
             Arch::Arm64 => "aarch64-unknown-linux-musl",
@@ -82,8 +85,8 @@ impl Arch {
         }
     }
 
-    /// `zig cc -target` triple（非 Linux 宿主交叉编译；zig 自带 musl
-    /// sysroot，静态由 musl 目标天然满足）。
+    /// `zig cc -target` triple (cross-compiling from non-Linux hosts; zig
+    /// bundles a musl sysroot, and the musl target is static by nature).
     pub(crate) fn zig_triple(self) -> &'static str {
         match self {
             Arch::Arm64 => "aarch64-linux-musl",
@@ -94,15 +97,17 @@ impl Arch {
 
 }
 
-// ---------------------------------------------------------------- 宿主平台
+// ---------------------------------------------------------------- Host platform
 
-// 宿主平台 —— QEMU 参数平台分支的唯一事实来源。
+// Host platform — the single source of truth for QEMU argument platform branches.
 //
-// 项目面向 Linux 与 macOS（Apple Silicon：QEMU 走 HVF 加速，且无 memfd
-// 内存后端）。argv 冻结基线按宿主平台各持一份：launcher 的 `argv_*` 单测
-// 显式钉死 `HostOs`，宿主平台只影响缺省取值，不影响冻结文本。
+// The project targets Linux and macOS (Apple Silicon: QEMU uses HVF
+// acceleration and has no memfd memory backend). The frozen argv baseline is
+// kept once per host platform: the launcher's `argv_*` unit tests pin
+// `HostOs` explicitly; the host platform only affects default values, never
+// the frozen text.
 
-/// 宿主操作系统（QEMU 能力差异的最小分类面）。
+/// Host operating system (the minimal classification of QEMU capability differences).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostOs {
     Linux,
@@ -110,7 +115,7 @@ pub(crate) enum HostOs {
 }
 
 impl HostOs {
-    /// 编译期宿主平台；未识别平台按 Linux 语义兜底。
+    /// Compile-time host platform; unrecognized platforms fall back to Linux semantics.
     pub(crate) fn current() -> Self {
         if cfg!(target_os = "macos") {
             HostOs::Darwin
@@ -133,7 +138,7 @@ mod host_os_tests {
 
     #[test]
     fn current_matches_compile_target() {
-        // 本 crate 零依赖也不做交叉编译，current() 只由编译目标决定
+        // Zero deps and no cross-compiling in this crate; current() is decided by the compile target alone
         let expect = if cfg!(target_os = "macos") {
             HostOs::Darwin
         } else {

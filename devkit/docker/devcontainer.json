@@ -1,23 +1,26 @@
-// VS Code Dev Container —— 静态模板（缺省卷形态：workspaceMount 钉死
-// virtuoso-kernel）。`--as` 命名的多卷不进这里：`virtuoso kernel
-// use/clone` 会按 current 活动卷 + 钉死工具链镜像自动渲染 git 忽略的
-// `.devcontainer/devcontainer.json`（repo 根，VS Code 自动发现——打开
-// 仓库「Reopen in Container」即可；image 直用 ghcr 发布镜像、首进免本地
-// build）。customizations 与渲染模板保持同源，改编辑器配置两处都要动。
+// VS Code Dev Container — static template (default volume form: workspaceMount
+// pinned to virtuoso-kernel). Multi-volume `--as` names do not come through
+// here: `virtuoso kernel use/clone` automatically renders the git-ignored
+// `.devcontainer/devcontainer.json` (repo root, auto-discovered by VS Code —
+// just "Reopen in Container" on the opened repo; the image is the published
+// ghcr image directly, no local build on first entry). customizations stay in
+// sync with the rendered template; editor config changes must touch both.
 //
-// 用法（macOS / Linux 通用）：
-//   1. virtuoso kernel clone <kernel-git-url>   （源码进 named volume）
-//   2a. 多卷/`--as` 命名卷：打开 repo 根 →「Reopen in Container」（吃渲染产物）
-//   2b. 缺省卷：Open Folder in Container → 选本 devkit/docker/ 目录
-//   3. workspace 即 /ksrc：clangd 在容器内索引，构建走集成终端
-//      virtuoso kernel build（或直接 make）
+// Usage (same on macOS / Linux):
+//   1. virtuoso kernel clone <kernel-git-url>   (source into a named volume)
+//   2a. Multi-volume / `--as`-named volumes: open the repo root → "Reopen in Container" (consumes the rendered artifact)
+//   2b. Default volume: Open Folder in Container → pick this devkit/docker/ directory
+//   3. The workspace is /ksrc: clangd indexes in-container; builds go through the integrated terminal:
+//      virtuoso kernel build (or plain make)
 //
-// CDB：`virtuoso kernel build` 末尾自动产出 /ksrc 原始形态的
-// compile_commands.json，容器内 clangd 直接消费，无需任何改写步骤。
+// CDB: `virtuoso kernel build` automatically produces the raw /ksrc-form
+// compile_commands.json at the end; in-container clangd consumes it directly,
+// with no rewriting step.
 //
-// 源码在 volume 里而不在 mac 目录：ext4 大小写敏感（内核构建的硬要求），
-// 且避免 APFS bind-mount 的性能损耗。编辑器体验等价（VS Code server 在
-// 容器内读写 volume）。
+// Source lives in the volume, not in a mac directory: ext4 is case-sensitive
+// (a hard requirement for kernel builds), and it avoids the performance cost
+// of APFS bind-mounts. The editing experience is equivalent (the VS Code
+// server reads and writes the volume in-container).
 {
   "name": "virtuoso-kernel",
   "build": { "dockerfile": "Dockerfile.kernel" },
@@ -32,15 +35,15 @@
         "ms-azuretools.vscode-docker"
       ],
       "settings": {
-        // clangd 在容器内跑：吃 /ksrc/.clangd + compile_commands.json
+        // clangd runs in-container: consumes /ksrc/.clangd + compile_commands.json
         "clangd.arguments": [
           "--background-index",
           "--clang-tidy=false",
           "--header-insertion=never",
           "--query-driver=/usr/bin/*"
         ],
-        // Rust 侧索引：容器里 make rust-analyzer 产出 rust-project.json，扩展自动拾取
-        // 内核 C 风格：8 空格缩进；Rust 侧走标准 rustfmt 四空格
+        // Rust-side indexing: make rust-analyzer in the container produces rust-project.json, picked up automatically by the extension
+        // Kernel C style: 8-space indent; the Rust side uses standard rustfmt 4-space
         "editor.tabSize": 8,
         "[c]": { "editor.insertSpaces": false },
         "[rust]": { "editor.tabSize": 4 },

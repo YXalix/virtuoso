@@ -1,80 +1,105 @@
 # Virtuoso Agent Guide
 
-本文件只写**规则与共识**：AI 在本仓库工作必须遵守的契约、命令面与验证循环。
-设计叙事、组件机制、配置全键、工件详解等**一律以 `docs/` 为唯一事实来源**
-（[在线站点](https://yxalix.github.io/virtuoso/)），本文件不复制其内容。
+This file documents only **rules and consensus**: the contracts, command surface, and
+validation loop that AI must follow when working in this repository. Design narratives,
+component mechanics, the full configuration key list, artifact details, and so on take
+`docs/` as the **single source of truth** ([online site](https://yxalix.github.io/virtuoso/));
+this file does not duplicate its content.
 
-## 定位与权威
+## Positioning and Authority
 
-Virtuoso 是 QEMU 内核 E2E 测试装置：供给内核 → 构建 BusyBox+musl 静态测试固件 →
-QEMU 启动跑 `/tests/` → 串口标记协议判定 → verdict.json 落盘。**单包 Rust crate
-是唯一行为权威**（`src/` 下：`main` 子命令分发 + `cli` 命令实现 + `config` 类型化
-配置 + `runs` 运行工件 + 领域模块 `builder` 构建 / `launcher` 启动+进程治理 /
-`judge` 判定 / `forge` 容器化内核供给；`arch`（Arch 矩阵 + HostOs）与
-`util`（顶层工具集）为原 common 摊平）；
-`infra/` 是 VM 内源资产（init、testcases、tools、busybox 名单——多为冻结数据）；
-仓库根 `rootfs.d/` 是用户 drop-in（构建期增量并入 rootfs，只增不覆盖；git 忽略，勿提交）；
-`devkit/` 是内核开发容器与 AI skill 源；构建产物与运行工件落 `target/`（git 忽略）。
+Virtuoso is a QEMU kernel E2E test harness: provision a kernel → build BusyBox+musl
+static test firmware → boot QEMU and run `/tests/` → judge via the serial marker
+protocol → write verdict.json to disk. **A single-package Rust crate is the sole
+behavioral authority** (under `src/`: `main` subcommand dispatch + `cli` command
+implementations + `config` typed configuration + `runs` run artifacts + the domain
+modules `builder` build / `launcher` launch+process governance / `judge` judging /
+`forge` containerized kernel provisioning; `arch` (Arch matrix + HostOs) and
+`util` (top-level utility set) are the former common, flattened out);
+`infra/` holds in-VM source assets (init, testcases, tools, the busybox list —
+mostly frozen data); the repo-root `rootfs.d/` is the user drop-in (merged
+additively into the rootfs at build time, additive-only; git-ignored, do not commit);
+`devkit/` is the kernel development container and AI skill source; build outputs and
+run artifacts land in `target/` (git-ignored).
 
-## 快速命令（复制即用）
+## Quick Commands (copy and run)
 
-`virtuoso` = 规范二进制（`cargo install --path .` 装入 PATH）；改完 CLI 源码
-重跑一次安装即可保持最新。
+`virtuoso` = the canonical binary (`cargo install --path .` installs it into PATH);
+after changing CLI source code, rerun the install once to stay up to date.
 
 ```bash
-virtuoso doctor             # 环境体检（✓/✗ 组件行；--verbose 全量诊断；--json）
-virtuoso build              # builder：重建 initrd.img / rootfs.img / tools.img（--busybox-only 仅备 BusyBox）
+virtuoso doctor             # environment health check (✓/✗ component lines; --verbose full diagnostics; --json)
+virtuoso build              # builder: rebuild initrd.img / rootfs.img / tools.img (--busybox-only prepares BusyBox only)
 virtuoso kernel clone <url> [--ref r] [--as vol] [--arch a] [--full]
-                            # forge：内核源码进 named volume（+ .clangd 渲染 + 写 current；--full 全量历史）
-virtuoso kernel build       # forge：容器 make Image/modules + 静态 bpftool + CDB（/ksrc 原始形态）
-                            #   （另有 defconfig/path/shell/list/use；源码编辑走 devkit/docker devcontainer）
-virtuoso test --timeout 60  # 测试：launcher 启动 → judge 判定 → 工件落盘
-virtuoso test --replay-until-fail 5   # flaky 返场：首个非 passed 即停
+                            # forge: kernel source into a named volume (+ .clangd rendering + writes current; --full full history)
+virtuoso kernel build       # forge: in-container make Image/modules + static bpftool + CDB (/ksrc in raw form)
+                            #   (also defconfig/path/shell/list/use; source editing goes through devkit/docker devcontainer)
+virtuoso test --timeout 60  # test: launcher boots → judge judges → artifacts land on disk
+virtuoso test --replay-until-fail 5   # flaky rerun: stop at the first non-passed result
 virtuoso shell [--kvm|--tcg] [--gdb]
-                            # 交互式 VM；--gdb = 挂起等 GDB :1234（恒 TCG）
+                            # interactive VM; --gdb = suspend waiting for GDB :1234 (always TCG)
 virtuoso probe --cmd 'uname -a' [--cmd-file f] [--json] [--timeout s]
-                               # AI 交互通道：virtio-serial agent 命令批（结构化事件流；--timeout 缺省 300）
-virtuoso skill install      # 装 kernel-dev + kernel-virtuoso skill 到内核树
+                               # AI interaction channel: virtio-serial agent command batch (structured event stream; --timeout defaults to 300)
+virtuoso skill install      # installs the kernel-dev + kernel-virtuoso skills into the kernel tree
 ```
 
-AI 的标准验证循环：`clippy → doctor → test`。改 Rust 源码必须先跑
-`cargo clippy --all-targets -- -D warnings`（CI 同款门禁，本地不过别提交）；
-再 `doctor → test`。**判定以 test 收尾的 verdict 行为准，
-机读唯一面 = run 目录下的 `verdict.json`**；退出码只是接口契约；
-`verdict: passed` 才算通过。doctor 是体检唯一入口（一屏
-呈现 + `--verbose` 全量），与 builder::verify 检查引擎同源（新增前置条件只动
-引擎，呈现自动跟随）。
+The standard validation loop for AI: `clippy → doctor → test`. After changing Rust
+source code, always run `cargo clippy --all-targets -- -D warnings` first (the same
+gate as CI; if it fails locally, do not commit), then `doctor → test`.
+**The verdict is the verdict line printed at the end of test; the sole
+machine-readable surface = `verdict.json` in the run directory**; exit codes are only
+an interface contract; `verdict: passed` is the only pass. doctor is the single entry
+point for health checks (one-screen presentation + `--verbose` full detail), backed by
+the same engine as builder::verify (new prerequisites only touch the engine; the
+presentation follows automatically).
 
-## 冻结的不变量（不要破坏）
+## Frozen Invariants (do not break)
 
-1. **标记协议 v1**（`infra/init` 输出，`docs/concepts/contracts.md` 冻结文本）：
-   `--- Running: X ---`、`PASSED:/FAILED: X`、`Test Results: N/M passed`、
-   `TEST_COMPLETE: ALL TESTS PASSED|SOME TESTS FAILED`。改文本等于破坏所有下游解析。
-2. **test 退出码**：0=通过、124=超时、其余=失败。
-3. **argv 冻结**：`QemuInvocation::argv` 的输出冻结在**按宿主平台的双基线**上
-   （Linux=memfd 后端、macOS=ram 后端、HVF→`-accel hvf`），由
-   `src/launcher/qemu/argv.rs` 的 `argv_*` 单测显式钉死平台把守；
-   人工复核用 `QEMU=echo virtuoso shell` 打印 argv。数据盘与 agent 通道属调用方
-   增量：**缺省（无盘无 agent）argv 与所属平台的基线逐字一致**。
-4. 测试必须静态链接（`-static`），禁止用 `|| true` 掩盖失败。
-5. **配置优先级：进程环境变量 > `virtuoso.toml`**：同名标量键以进程环境变量
-   为准（CI/命令行临时改参不动文件）；持久配置只写 `virtuoso.toml`。
+1. **Marker protocol v1** (emitted by `infra/init`, frozen text in
+   `docs/concepts/contracts.md`):
+   `--- Running: X ---`, `PASSED:/FAILED: X`, `Test Results: N/M passed`,
+   `TEST_COMPLETE: ALL TESTS PASSED|SOME TESTS FAILED`. Changing the text breaks all
+   downstream parsing.
+2. **test exit codes**: 0=passed, 124=timeout, anything else=failed.
+3. **argv freeze**: the output of `QemuInvocation::argv` is frozen to the
+   **per-host-platform dual baselines** (Linux=memfd backend, macOS=ram backend,
+   HVF→`-accel hvf`), guarded by the `argv_*` unit tests in
+   `src/launcher/qemu/argv.rs`, which pin each platform explicitly;
+   for manual review, use `QEMU=echo virtuoso shell` to print argv. The data disk and
+   agent channel are caller-side increments: **the default (no disk, no agent) argv
+   matches its platform's baseline verbatim**.
+4. Tests must be statically linked (`-static`); masking failures with `|| true` is
+   forbidden.
+5. **Configuration precedence: process environment variables > `virtuoso.toml`**: for
+   the same scalar key, the process environment variable wins (CI/command-line
+   temporary parameter changes never touch files); persistent configuration is written
+   only to `virtuoso.toml`.
 
-## 共识
+## Consensus
 
-- **文档唯一事实来源**：`docs/`（mdBook 书根 = `docs/`，`mdbook build docs`
-  构建，push main 自动发布 gh-pages）。改动文档只动 `docs/`，别处引用不复制内容。
-  入口：`docs/concepts/`（理念/流水线/引导/契约/组件）、`docs/usage/`（CLI/配置/
-  测试编写/调试/工件/AI 集成/故障排查）、`docs/quick-start.md`、`docs/contributing.md`。
-- **组件化配置**：`virtuoso.toml` 唯一配置面（env > toml），`[components.*]`
-  段声明 VM 能力；builder 按启用组件 require 并集生成模块清单。全键与语义见
-  `docs/usage/configuration.md`，模板见仓库根 `virtuoso.toml` 注释。
-- **运行工件**：`virtuoso test` 写 `target/runs/<unix_ms>-<arch>/`（保留 20 次），
-  `verdict.json` 是判定唯一机读面、`events.jsonl` 是逐事件结构化事实源。
-  文件表与 Verdict 八态语义见 `docs/usage/artifacts.md`。
-- **内核开发容器**：源码权威在 named volume，宿主经 `virtuoso kernel path` 的
-  平台视图编辑（视图大小写保真，严禁在 APFS checkout 内核树、严禁双 make
-  并行）。详见 `devkit/skills/kernel-dev/SKILL.md` 与 `docs/quick-start.md`。
-- **已知环境怪癖（勿"修复"）**：见 `docs/concepts/boot.md` 怪癖表——
-  空 `/dev` 回退 mknod、virtio/ext4 必须 `=m` 进 initramfs 等都是 openEuler
-  内核实测行为，删掉对应 fallback 会重新踩坑。
+- **Docs are the single source of truth**: `docs/` (mdBook book root = `docs/`, built
+  with `mdbook build docs`; pushing main auto-publishes gh-pages). Change docs only in
+  `docs/`; elsewhere, reference them instead of copying content.
+  Entry points: `docs/concepts/` (philosophy/pipeline/boot/contracts/components),
+  `docs/usage/` (CLI/configuration/writing tests/debugging/artifacts/AI
+  integration/troubleshooting), `docs/quick-start.md`, `docs/contributing.md`.
+- **English-only surface**: code comments, docs, and user-visible strings are written
+  in English (repo-wide conversion); keep all new text English too.
+- **Component-based configuration**: `virtuoso.toml` is the single configuration
+  surface (env > toml); `[components.*]` sections declare VM capabilities; the builder
+  generates the module manifest from the union of requires of the enabled components.
+  For all keys and semantics see `docs/usage/configuration.md`; for the template see
+  the comments in the repo-root `virtuoso.toml`.
+- **Run artifacts**: `virtuoso test` writes `target/runs/<unix_ms>-<arch>/` (last 20
+  runs kept); `verdict.json` is the sole machine-readable verdict surface and
+  `events.jsonl` the per-event structured source of truth. See `docs/usage/artifacts.md`
+  for the file table and the eight Verdict state semantics.
+- **Kernel development container**: the source of truth for kernel source is the named
+  volume; the host edits it through the platform view of `virtuoso kernel path`
+  (the view is case-faithful; never check out a kernel tree onto APFS, never run two
+  makes in parallel). See `devkit/skills/kernel-dev/SKILL.md` and
+  `docs/quick-start.md` for details.
+- **Known environment quirks (do not "fix")**: see the quirk table in
+  `docs/concepts/boot.md` — the empty `/dev` fallback to mknod, virtio/ext4 having to
+  be `=m` in the initramfs, and so on are all observed openEuler kernel behavior;
+  removing the corresponding fallbacks will re-trigger those pitfalls.

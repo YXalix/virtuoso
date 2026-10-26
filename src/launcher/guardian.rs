@@ -1,22 +1,25 @@
-//! guardian — 守护者：进程组与终端前台的 RAII 治理。
+//! guardian — the guardian: RAII governance of process groups and the terminal foreground.
 //!
-//! `ProcessGroupGuard` 取代早期 Makefile 驱动方案的 PID 文件 + `kill -- -PGID` hack：
-//! guard 存活即持有进程组，`Drop`（含 panic 展开、错误提前返回、Ctrl-C 退出路径）
-//! 保证收割，宿主机不残留 QEMU 子进程。`Supervised` 在此之上叠加活动进程组
-//! 注册表（Ctrl-C 守护收割）；注册表与墙钟看门狗同文件承载（registry 节）。
-//! `TerminalHandover` 补齐终端前台这一面：交互会话把控制终端前台移交给
-//! QEMU 进程组（移交动作在子进程 exec 前完成，见 qemu::spawn），
-//! finish/Drop 时还原给调用方进程组。
+//! `ProcessGroupGuard` replaces the PID-file + `kill -- -PGID` hack of the early
+//! Makefile-driven scheme: the guard holds the process group while alive, and `Drop`
+//! (covering panic unwinds, early error returns, and the Ctrl-C exit path) guarantees
+//! reaping, leaving no stray QEMU child on the host. `Supervised` layers an active
+//! process-group registry on top (reaped by the Ctrl-C guardian); the registry and the
+//! wall-clock watchdog live in the same file (the registry section). `TerminalHandover`
+//! covers the terminal foreground side: interactive sessions hand the controlling
+//! terminal's foreground to the QEMU process group (the handover completes before the
+//! child execs, see qemu::spawn); finish/Drop restores it to the caller's process group.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// 对进程组发送信号。sig 支持 "KILL" / "TERM"，"0" 为存活探测（不发信号，
-/// 仅做存在性与权限检查）。pgid=0 一律拒绝：killpg(0) 会命中调用者自身
-/// 所在进程组。公开给看门狗线程等无法持有 guard 的调用方使用。
-/// 返回 false = 组不存在、无权限或信号名不支持。
+/// Signals a process group. sig accepts "KILL" / "TERM"; "0" is a liveness probe
+/// (no signal sent, only existence and permission checks). pgid=0 is always rejected:
+/// killpg(0) would hit the caller's own process group. Exposed for callers such as the
+/// watchdog thread that cannot hold a guard.
+/// Returns false = group missing, no permission, or unsupported signal name.
 pub(crate) fn signal_group(pgid: u32, sig: &str) -> bool {
     if pgid == 0 {
         return false;
@@ -27,19 +30,19 @@ pub(crate) fn signal_group(pgid: u32, sig: &str) -> bool {
         "0" => 0,
         _ => return false,
     };
-    // SAFETY: killpg 仅向目标进程组发送 signum；pgid=0 已在上方拒绝。
+    // SAFETY: killpg only sends signum to the target process group; pgid=0 was rejected above.
     unsafe { libc::killpg(pgid as libc::pid_t, signum) == 0 }
 }
 
-/// 进程组收割守卫。`process_group(0)` spawn 的子进程 pid 即 pgid；
-/// 未 `disarm` 即 `Drop` 时 KILL 整个进程组。
+/// Process-group reaping guard. For a child spawned with `process_group(0)` the pid is
+/// the pgid; dropping without `disarm` KILLs the whole process group.
 pub(crate) struct ProcessGroupGuard {
     pgid: u32,
     armed: bool,
 }
 
 impl ProcessGroupGuard {
-    /// 接管一个进程组。
+    /// Adopts a process group.
     pub(crate) fn adopt(pgid: u32) -> Self {
         Self {
             pgid,
@@ -47,7 +50,7 @@ impl ProcessGroupGuard {
         }
     }
 
-    /// KILL 整个进程组（幂等；收割后 guard 自动失效）。
+    /// KILLs the whole process group (idempotent; the guard disarms itself after reaping).
     pub(crate) fn kill_now(&mut self) {
         if self.armed {
             signal_group(self.pgid, "KILL");
@@ -55,7 +58,7 @@ impl ProcessGroupGuard {
         }
     }
 
-    /// 解除收割责任（确信进程组已自然退出时调用）。
+    /// Releases the reaping duty (call once the process group is known to have exited).
     pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
@@ -69,28 +72,31 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-/// 终端前台移交守卫：记录调用方当前的前台进程组，会话结束时还原。
-/// 还原覆盖 job-control shell 自行回收之外的场景（无 job control 的
-/// 祖先脚本不会回收——前台组悬死会让后续读 tty 的进程冻结）。
+/// Terminal foreground handover guard: records the caller's current foreground process
+/// group and restores it when the session ends. The restoration covers cases beyond a
+/// job-control shell reclaiming it on its own (an ancestor script without job control
+/// never reclaims — a dangling foreground group freezes later processes reading the tty).
 pub(crate) struct TerminalHandover {
     saved_pgid: libc::pid_t,
 }
 
 impl TerminalHandover {
-    /// 记录当前终端前台组。fd0 非控制终端 → Ok(None)（piped 路径 / 无 tty
-    /// 环境，QEMU 读管道或 /dev/null，不存在 SIGTTIN 问题，无需移交）。
+    /// Records the current terminal foreground group. fd0 not a controlling terminal →
+    /// Ok(None) (piped path / tty-less environment: QEMU reads a pipe or /dev/null, no
+    /// SIGTTIN issue, no handover needed).
     pub(crate) fn capture() -> anyhow::Result<Option<Self>> {
-        // SAFETY: isatty 只查询 fd 类型，无副作用。
+        // SAFETY: isatty only queries the fd type; no side effects.
         if unsafe { libc::isatty(0) } != 1 {
             return Ok(None);
         }
-        // SAFETY: tcgetpgrp 只读终端前台归属。
+        // SAFETY: tcgetpgrp only reads the terminal foreground owner.
         let saved_pgid = unsafe { libc::tcgetpgrp(0) };
         if saved_pgid < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ENOTTY) {
-                // fd0 是 tty 但非本会话控制终端（isatty 已过）：读写这种
-                // 终端不触发 SIGTTIN/SIGTTOU，无需移交，按无终端处理。
+                // fd0 is a tty but not this session's controlling terminal (isatty already
+                // passed): reading or writing such a terminal raises no SIGTTIN/SIGTTOU;
+                // no handover needed, treat as tty-less.
                 return Ok(None);
             }
             anyhow::bail!("tcgetpgrp(0) failed: {err}");
@@ -101,16 +107,17 @@ impl TerminalHandover {
 
 impl Drop for TerminalHandover {
     fn drop(&mut self) {
-        // QEMU（前台组）退出后调用方回到"后台"；后台组调 tcsetpgrp 的内核
-        // 响应是 SIGTTOU（默认动作 stop），还原期间必须先阻塞。
+        // After QEMU (the foreground group) exits, the caller is back "in the background";
+        // the kernel response to a background group calling tcsetpgrp is SIGTTOU (default
+        // action stop), so the signal must be blocked for the restoration.
         let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
         let mut saved_mask: libc::sigset_t = unsafe { std::mem::zeroed() };
-        // SAFETY: sigset_t 清零 + sigemptyset 后使用；掩码改动仅本线程。
+        // SAFETY: sigset_t zeroed + sigemptyset before use; the mask change affects this thread only.
         unsafe {
             libc::sigemptyset(&mut blocked);
             libc::sigaddset(&mut blocked, libc::SIGTTOU);
             if libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut saved_mask) != 0 {
-                return; // 拿不到掩码就不动前台：宁可悬挂前台也不冒险 stop 自己
+                return; // without the mask, leave the foreground alone: better dangling than risking self-stop
             }
             libc::tcsetpgrp(0, self.saved_pgid);
             libc::pthread_sigmask(libc::SIG_SETMASK, &saved_mask, std::ptr::null_mut());
@@ -118,8 +125,9 @@ impl Drop for TerminalHandover {
     }
 }
 
-/// 注册表登记 + 收割守卫的组合句柄：spawn 后 `adopt` 一次、收尾 `finish`
-/// 一次，取代调用方的 register / adopt / 注销 / disarm 四步样板。
+/// Combined handle of registry registration + reaping guard: `adopt` once after spawn,
+/// `finish` once at teardown, replacing the caller's four-step register / adopt /
+/// unregister / disarm boilerplate.
 pub(crate) struct Supervised {
     pgid: u32,
     guard: ProcessGroupGuard,
@@ -127,7 +135,7 @@ pub(crate) struct Supervised {
 }
 
 impl Supervised {
-    /// 接管一个进程组并登记为活动进程组（Ctrl-C 守护可见）。
+    /// Adopts a process group and registers it as active (visible to the Ctrl-C guardian).
     pub(crate) fn adopt(pgid: u32) -> Self {
         register(pgid);
         Self {
@@ -137,8 +145,9 @@ impl Supervised {
         }
     }
 
-    /// 挂上终端前台还原责任（交互会话专用）。guard 声明在 tty 之前：
-    /// 异常 Drop 路径先收割 QEMU 再还原前台。
+    /// Attaches terminal foreground restoration duty (interactive sessions only). The
+    /// guard is declared before tty: on an exceptional Drop path QEMU is reaped before
+    /// the foreground is restored.
     pub(crate) fn with_tty(mut self, tty: Option<TerminalHandover>) -> Self {
         self.tty = tty;
         self
@@ -148,46 +157,50 @@ impl Supervised {
         self.pgid
     }
 
-    /// KILL 整个进程组（幂等；收割后自动失效）。
+    /// KILLs the whole process group (idempotent; disarms itself after reaping).
     pub(crate) fn kill_now(&mut self) {
         self.guard.kill_now();
     }
 
-    /// 注销注册表并解除收割责任（进程组已自然退出时调用）；
-    /// 终端前台同点还原给调用方进程组。
+    /// Unregisters from the registry and releases the reaping duty (call once the process
+    /// group has exited naturally); the terminal foreground is restored to the caller's
+    /// process group at the same point.
     pub(crate) fn finish(&mut self) {
         clear();
         self.guard.disarm();
-        self.tty = None; // Drop 即还原前台
+        self.tty = None; // Drop restores the foreground
     }
 }
 
-// ---------------------------------------------------------------- 注册表与看门狗
+// ---------------------------------------------------------------- registry and watchdog
 
-// 活动进程组注册表：Ctrl-C 守护与墙钟看门狗共用的全局状态。
+// Active process-group registry: global state shared by the Ctrl-C guardian and the
+// wall-clock watchdog.
 //
-// 同一时刻至多一个被包装的 VM 进程组；`Supervised::adopt` 登记、
-// `finish` 注销，Ctrl-C 守护据此收割，取代调用方散落的静态变量样板。
+// At most one wrapped VM process group at a time; `Supervised::adopt` registers it and
+// `finish` unregisters; the Ctrl-C guardian reaps accordingly, replacing scattered
+// static-variable boilerplate at call sites.
 
 static ACTIVE_PGID: AtomicU32 = AtomicU32::new(0);
 
-/// 登记当前被包装的进程组（Ctrl-C 守护据此收割）。
+/// Registers the currently wrapped process group (the Ctrl-C guardian reaps accordingly).
 pub(crate) fn register(pgid: u32) {
     ACTIVE_PGID.store(pgid, Ordering::SeqCst);
 }
 
-/// 注销（进程组自然退出或已收割后调用）。
+/// Unregisters (call after the process group exits naturally or has been reaped).
 pub(crate) fn clear() {
     ACTIVE_PGID.store(0, Ordering::SeqCst);
 }
 
-/// 当前活动进程组（0 = 无；仅供本模块守护/看门狗收割用）。
+/// Current active process group (0 = none; consumed only by this module's guardian/watchdog).
 fn active() -> u32 {
     ACTIVE_PGID.load(Ordering::SeqCst)
 }
 
-/// 安装 Ctrl-C 守护：KILL 活动进程组后以 130 退出（与 shell 中断语义一致；
-/// 常量钉在 crate::util，judge 为唯一退出码语义表）。
+/// Installs the Ctrl-C guardian: KILLs the active process group, then exits 130 (matching
+/// shell interrupt semantics; the constant is pinned in crate::util, with judge as the
+/// single exit-code semantics table).
 pub(crate) fn install_ctrlc_guard() {
     let _ = ctrlc::set_handler(|| {
         let pgid = active();
@@ -198,8 +211,9 @@ pub(crate) fn install_ctrlc_guard() {
     });
 }
 
-/// 墙钟看门狗：到点 KILL 进程组并置位 quit（等价 timeout --signal=KILL 的
-/// 124 语义；调用方据 quit 位区分超时与自然退出）。
+/// Wall-clock watchdog: at the deadline KILLs the process group and sets quit (equivalent
+/// to timeout --signal=KILL's 124 semantics; callers read the quit flag to tell timeout
+/// from natural exit).
 pub(crate) fn spawn_watchdog(
     pgid: u32,
     timeout_secs: u64,
@@ -261,14 +275,14 @@ mod tests {
         let (mut child, pgid) = spawn_sleep_group("60");
         let mut guard = ProcessGroupGuard::adopt(pgid);
         guard.kill_now();
-        guard.kill_now(); // 第二次不 panic、不发信号
+        guard.kill_now(); // second call: no panic, no signal
         let _ = child.wait();
         assert!(!group_alive(pgid));
     }
 
     #[test]
     fn adopt_zero_is_inert() {
-        // pgid=0 必须是惰性的：signal_group 拒绝 -0（否则会杀死当前进程组）
+        // pgid=0 must be inert: signal_group rejects -0 (otherwise it would kill the current process group)
         let mut guard = ProcessGroupGuard::adopt(0);
         guard.kill_now();
         guard.disarm();

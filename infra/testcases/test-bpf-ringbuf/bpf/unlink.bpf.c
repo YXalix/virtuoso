@@ -1,14 +1,20 @@
-// unlink.bpf.c — 程序态 eBPF 试点程序：kprobe do_unlinkat → ringbuf 事件。
+// unlink.bpf.c — programmatic eBPF pilot program: kprobe do_unlinkat, then
+// ringbuf events.
 //
-// 自包含设计：不 include 内核 uapi 头（.bpf.o 在宿主编译，宿主无 linux 头
-// 树），只落最小类型/宏/助手声明。助手函数指针的值 = uapi bpf.h 的
-// BPF_FUNC_* ABI id（冻结数字），clang BPF 后端把"常量函数指针调用"降为
-// call imm。无 CO-RE 重定位（不解引用内核结构体字段），加载端无需
-// vmlinux BTF 参与。编译：clang -target bpf -g -O2（-g 产 BTF，供
-// SEC(".maps") 的 BTF map 定义被 aya 解析）。
+// Self-contained design: no kernel uapi headers are included (the .bpf.o is
+// built on the host, which has no linux header tree); only minimal type/
+// macro/helper declarations are laid down. The helper function pointer
+// values are the BPF_FUNC_* ABI ids from uapi bpf.h (frozen numbers); the
+// clang BPF backend lowers "calls through constant function pointers" to
+// call imm. No CO-RE relocations (no dereferencing kernel struct fields),
+// so the loading side needs no vmlinux BTF. Build: clang -target bpf -g -O2
+// (-g emits BTF so the SEC(".maps") BTF map definitions can be parsed by
+// aya).
 //
-// 事件语义：本用例自身 unlink 一个文件触发 kprobe，ringbuf 收到的事件
-// pid 必等于本进程 pid——「加载→挂接→触发→回流」全链的最小确定性证明。
+// Event semantics: the test case itself unlinks a file to fire the kprobe;
+// the event received over the ringbuf must have pid equal to this process's
+// pid — the minimal deterministic proof of the full load, attach, trigger,
+// return chain.
 
 typedef unsigned int __u32;
 typedef unsigned long long __u64;
@@ -16,13 +22,13 @@ typedef unsigned long long __u64;
 #define SEC(NAME) __attribute__((section(NAME), used))
 #define __uint(name, val) int (*name)[val]
 
-/* eBPF 助手函数指针（uapi helper ABI id） */
+/* eBPF helper function pointers (uapi helper ABI ids) */
 static void *(*bpf_ringbuf_reserve)(void *ringbuf, __u64 size, __u64 flags) = (void *)131;
 static void (*bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)132;
 static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)14;
 static long (*bpf_get_current_comm)(void *buf, __u32 size) = (void *)16;
 
-/* BPF_MAP_TYPE_RINGBUF = 27（uapi bpf.h，数字冻结） */
+/* BPF_MAP_TYPE_RINGBUF = 27 (uapi bpf.h, frozen number) */
 struct {
     __uint(type, 27);
     __uint(max_entries, 1 << 16);

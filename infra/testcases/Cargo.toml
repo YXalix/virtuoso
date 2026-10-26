@@ -1,28 +1,32 @@
 [workspace]
 resolver = "2"
-# 用例目录走 glob：新用例 = 丢一个 test-<name>/ 目录进来，无需编辑本文件
+# Test case directories use globs: a new test case = drop a test-<name>/
+# directory in; no need to edit this file
 members = ["coda", "coda-scaffold", "test-*"]
 
-# 独立 workspace：测试用例固件不进入 virtuoso 主 workspace 的依赖图
-# （根 Cargo.toml 有对应 exclude）。由 builder::testcase::install_rust 以
-# `cargo build --release --target <musl triple>` 编译，产物拷入 rootfs 的
-# /tests/（init 自动发现；crate 声明 package.metadata.virtuoso.group 时装进
-# /tests/<group>/ 子目录 = 测试组）。每个 test-* member = 一个用例二进制；
-# C 测试体放在用例 crate 的 c/ 下，由该 crate 的一行 build.rs（coda-scaffold）
-# 编入同一二进制；coda = 测试框架，coda-scaffold = build.rs 共享脚手架。
+# Standalone workspace: test case firmware stays out of the virtuoso main
+# workspace dependency graph (the root Cargo.toml has a matching exclude).
+# Built by builder::testcase::install_rust with
+# `cargo build --release --target <musl triple>`; artifacts are copied into
+# the rootfs /tests/ (auto-discovered by init; crates declaring
+# package.metadata.virtuoso.group are installed into a /tests/<group>/
+# subdirectory = test group). Each test-* member = one test case binary;
+# C test bodies live under the test case crate's c/ and are compiled into
+# the same binary by its one-line build.rs (coda-scaffold);
+# coda = test framework, coda-scaffold = shared build.rs scaffold.
 
 [profile.release]
 panic = "abort"
 lto = true
 codegen-units = 1
 strip = true
-# VM 内无动态加载器：-static 冻结约束。musl 目标 crt-static 是 rustc
-# 默认行为，且 rustc 自含 musl libc.a + rust-lld（与 infra/tools 同配方），
-# 这里零 rustflags；宿主不需要 musl 交叉工具链，只需要
-# `rustup target add <triple>`。
+# No dynamic loader inside the VM: -static is a frozen constraint. crt-static
+# is rustc's default for musl targets, and rustc bundles musl libc.a +
+# rust-lld (same recipe as infra/tools), so no rustflags here; the host needs
+# no musl cross toolchain, just `rustup target add <triple>`.
 #
-# builder 恒以 `--target <musl triple>` 构建（testcase::install_rust）；
-# 非 Linux 宿主由 builder 注入 CARGO_TARGET_<TRIPLE>_LINKER（zig cc 包装，
-# 见 builder::cross，并附 -C link-self-contained=no 让 zig 供给 crt1/libc）。
-# C 测试体的编译器由 builder 注入 CC_<TRIPLE>（同一个 zig cc 包装），
-# 见用例 crate 的 build.rs。
+# builder always builds with `--target <musl triple>` (testcase::install_rust);
+# on non-Linux hosts builder injects CARGO_TARGET_<TRIPLE>_LINKER (a zig cc
+# wrapper, see builder::cross, plus -C link-self-contained=no so zig supplies
+# crt1/libc). The C test body compiler is injected by builder as CC_<TRIPLE>
+# (the same zig cc wrapper); see the test case crate's build.rs.

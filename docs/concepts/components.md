@@ -1,237 +1,286 @@
-# 组件机制
+# Components
 
-VM 能力按组件配置在 `virtuoso.toml` 的 `[components.*]` 段。组件是
-**声明式的**：开关 + KO 依赖，builder 负责把启用组件的需求并成模块清单、
-launcher 负责生成对应的 QEMU 参数。
+VM capabilities are configured as components in the `[components.*]` sections
+of `virtuoso.toml`. Components are **declarative**: a switch + KO
+dependencies — the builder merges the requirements of the enabled components
+into a module manifest, and the launcher generates the corresponding QEMU
+arguments.
 
-## 组件一览
+## Component Overview
 
-| 组件 | 作用 | 段缺省 | 专属键 |
+| Component | Purpose | Section default | Dedicated keys |
 |---|---|---|---|
-| [tools_disk](#tools_disk--vm-内工具盘) | tools.img 数据盘 → `/dev/vdb` 挂 `/tools`（VM 内工具，musl 静态） | **启用** | — |
-| [agent](#agent--ai-probe-通道) | AI probe 通道（virtio-serial + guest 侧 virtuoso-agent） | 关闭 | — |
-| [vfio](#vfio--pci-直通) | PCI 直通，逐条生成 `-device vfio-pci,host=<bdf>` | 关闭 | `devices` |
-| [numa](#numa--多节点拓扑) | 多节点拓扑（每节点一个 socket） | 关闭 | `nodes`、`memory_per_node` |
-| [pmem](#pmem--持久内存) | 持久内存（DT 途径 → `/dev/pmem0` + DAX） | 关闭 | `size`、`require` |
-| [bpf](#bpf--bpftrace-观测) | bpftrace 随 tools 盘供给（eBPF 内核观测） | 关闭 | — |
+| [tools_disk](#tools_disk--in-vm-tool-disk) | tools.img data disk → `/dev/vdb` mounted at `/tools` (in-VM tools, musl static) | **enabled** | — |
+| [agent](#agent--ai-probe-channel) | AI probe channel (virtio-serial + guest-side virtuoso-agent) | off | — |
+| [vfio](#vfio--pci-passthrough) | PCI passthrough, emitting one `-device vfio-pci,host=<bdf>` per entry | off | `devices` |
+| [numa](#numa--multi-node-topology) | multi-node topology (one socket per node) | off | `nodes`, `memory_per_node` |
+| [pmem](#pmem--persistent-memory) | persistent memory (device-tree route → `/dev/pmem0` + DAX) | off | `size`, `require` |
+| [bpf](#bpf--bpftrace-observability) | bpftrace shipped with the tools disk (eBPF kernel observability) | off | — |
 
-`[busybox]` 是全局段（非组件），`[tests]` 是测例套件段（收用例需要的
-模块依赖），见[配置参考](../usage/configuration.md)。
+`[busybox]` is a global section (not a component), `[tests]` is the test suite
+section (collecting the module dependencies the test cases need); see the
+[Configuration Reference](../usage/configuration.md).
 
-## 公共字段
+## Common Fields
 
-每个 `[components.<name>]` 段支持：
+Every `[components.<name>]` section supports:
 
-- `enabled`：开关。**段缺省 = 各组件自己的缺省**（tools_disk 缺省启用，其余缺省关闭）。
-- `require`：KO 依赖，条目 = conf 行 `"<module> [key=val ...]"`（token 原样透传 insmod）。
-- `stage`：`boot`（root 挂载前就要）｜ `runtime`（缺省）。
+- `enabled`: the switch. **Section default = each component's own default**
+  (tools_disk defaults to enabled, everything else defaults to off).
+- `require`: KO dependencies; an entry = a conf line
+  `"<module> [key=val ...]"` (tokens passed through to insmod verbatim).
+- `stage`: `boot` (needed before root is mounted) | `runtime` (default).
 
 ```toml
-[components.agent]          # 段缺省 = 关闭；取消注释即启用
+[components.agent]          # section default = off; uncomment to enable
 enabled = true
 require = ["virtio_console"]
 ```
 
-仓库根的 `virtuoso.toml` 模板中，可选组件全部以注释形式在场，取消注释即启用。
+In the `virtuoso.toml` template at the repo root, every optional component is
+present as a comment; uncomment to enable.
 
-## 模块清单由组件生成（不手写）
+## Module Manifests Are Generated from Components (Never Hand-Written)
 
-模块供给是组件机制的直接产物（双清单规则的完整版见
-[两段式引导](boot.md#3-模块双清单规则)）：
+Module provisioning is a direct product of the component mechanism (for the
+full version of the dual manifest rule, see
+[Two-Stage Boot](boot.md#3-the-dual-module-manifest-rule)):
 
-- `infra/modules-boot.conf`（**冻结基础集**：virtio + ext4 及依赖）进 initramfs，
-  由 `init-initramfs` 在 pivot 前 insmod；
-- 组件条目 `stage = "boot"` 追加到基础集之后；
-- 其余来自启用组件的 `require` **并集**（外加 `[tests]` 段的测例模块依赖，
-  排在最后），builder 写入 rootfs `/lib/modules/modules.conf`，测试 init 在
-  pivot 后加载。
+- `infra/modules-boot.conf` (the **frozen base set**: virtio + ext4 and their
+  dependencies) goes into the initramfs, insmodded by `init-initramfs` before
+  the pivot;
+- component entries with `stage = "boot"` are appended after the base set;
+- everything else comes from the **union** of the enabled components'
+  `require` (plus the `[tests]` section's test module dependencies, placed
+  last); the builder writes it to the rootfs `/lib/modules/modules.conf`, and
+  the test init loads it after the pivot.
 
-并集规则：schema 固定顺序 tools_disk→agent→vfio→numa→pmem→bpf→`[tests]`，
-按首 token 去重保首个。
+Union rule: fixed schema order tools_disk→agent→vfio→numa→pmem→bpf→`[tests]`,
+dedupe by first token keeping the first occurrence.
 
-规则与陷阱：
+Rules and pitfalls:
 
-- **顺序敏感**：按清单顺序 insmod（无自动依赖解析），依赖在前。
-- **模块必须已构建**：`kernel_path` 下找不到对应 `.ko` 直接构建报错。
-- **迭代中的模块优先 `=m` 而非 `=y`**：免内核重建，回路更快。
-- 判断 `stage` 的标准：**这个模块是不是"root 挂上之前就必须在内核里"**？
-  是 → `stage = "boot"`，否 → 缺省 runtime。
+- **Order-sensitive**: modules are insmodded in manifest order (no automatic
+  dependency resolution); dependencies come first.
+- **Modules must already be built**: a `.ko` missing under `kernel_path`
+  fails the build outright.
+- **Prefer `=m` over `=y` for modules under iteration**: no kernel rebuild,
+  a faster loop.
+- The criterion for `stage`: **does this module have to be in the kernel
+  "before root is mounted"**? Yes → `stage = "boot"`; no → the default
+  runtime.
 
-`virtuoso probe` 恒开 agent 通道（强制并入 `virtio_console`，不依赖组件开关）。
+`virtuoso probe` always opens the agent channel (force-merging
+`virtio_console`, independent of the component switch).
 
-## tools_disk — VM 内工具盘
+## tools_disk — In-VM Tool Disk
 
-把 `infra/tools/` workspace 构建的常驻工具装进独立数据盘，随 VM 外挂，
-与测试用例（`/tests/`，参与判定）正交分离。
+Puts the resident tools built from the `infra/tools/` workspace onto a
+separate data disk attached alongside the VM, cleanly separated from the test
+cases (`/tests/`, which participate in judging).
 
 ```toml
-[components.tools_disk]   # 段缺省 = 启用；显式关闭：
+[components.tools_disk]   # section default = enabled; to disable explicitly:
 # enabled = false
 ```
 
-工作方式：builder 构建 `infra/tools/`（std Rust + **musl 静态**）装入 ext4
-数据盘 `/bin/`（卷标 `tools`）；启动时作为 rootfs 之后的第一个 virtio-blk
-数据盘附加（guest 内 `/dev/vdb`，rootfs 恒 `/dev/vda`）；rootfs 的
-`/init-hooks.sh` 把它挂到 `/tools` 并把 `/tools/bin` 注入 `PATH`（位于
-devtmpfs 挂载后、insmod / agent 拉起前）。
+How it works: the builder builds `infra/tools/` (std Rust + **musl static**)
+into the `/bin/` of an ext4 data disk (volume label `tools`); at boot it is
+attached as the first virtio-blk data disk after the rootfs (`/dev/vdb` inside
+the guest; the rootfs is always `/dev/vda`); the rootfs's `/init-hooks.sh`
+mounts it at `/tools` and injects `/tools/bin` into `PATH` (after devtmpfs is
+mounted, before insmod / agent startup).
 
-工具不进 `/tests/`、不参与判定：它们是运行环境的一部分（如 `virtuoso-agent`），
-不是被测对象。新工具 = `infra/tools/` 下新 crate，musl 静态产物自动进
-tools.img 的 `/bin/`。
+Tools do not go into `/tests/` and do not participate in judging: they are
+part of the runtime environment (e.g. `virtuoso-agent`), not the thing under
+test. A new tool = a new crate under `infra/tools/`; its musl static artifact
+lands in tools.img's `/bin/` automatically.
 
-降级行为：工具供给缺失（如宿主缺 musl target）时**显式降级非掩盖**——不产出
-tools.img、不注入挂载 hook，构建日志给出原因。`enabled = false` 时同理会跳过
-整条链路。
+Degradation: when the tool provisioning is missing (e.g. the host lacks the
+musl target), the behavior is **explicit degradation, never masking** —
+tools.img is not produced, the mount hook is not injected, and the build log
+states the reason. `enabled = false` likewise skips the entire chain.
 
-## agent — AI probe 通道
+## agent — AI probe channel
 
-宿主与 guest 之间的结构化交互通道：virtio-serial 串口 + guest 侧
-`virtuoso-agent`（tools.img 内），用 JSON 行协议双向通信。这是
-`virtuoso probe`（[AI 集成](../usage/ai-integration.md)）的底座。
+A structured interaction channel between host and guest: a virtio-serial
+console + the guest-side `virtuoso-agent` (inside tools.img), speaking a
+line-based JSON protocol in both directions. This is the foundation of
+`virtuoso probe` ([AI Integration](../usage/ai-integration.md)).
 
 ```toml
-[components.agent]        # 段缺省 = 关闭（argv 保持冻结基线）
+[components.agent]        # section default = off (argv keeps the frozen baseline)
 enabled = true
 require = ["virtio_console"]
 ```
 
-`virtuoso probe` **恒开** agent 通道（强制并入 `virtio_console`），不依赖
-本组件开关——临时探测不用改配置。
+`virtuoso probe` **always** opens the agent channel (force-merging
+`virtio_console`), independent of this component's switch — ad-hoc probing
+needs no configuration changes.
 
-工作方式：启用后 launcher 追加 virtio-serial 设备参数（属调用方增量，追加在
-argv 冻结基线之后）；guest 侧 `infra/init` 经 `/init-hooks.sh` 拉起
-`/tools/virtuoso-agent`；agent 在 virtio-serial 上收 JSON 行命令、回 JSON 行
-事件（结构化事件流，非模拟终端敲键盘）；宿主侧事件流落盘 run 目录的
-`agent-events.jsonl`。
+How it works: when enabled, the launcher appends the virtio-serial device
+arguments (a caller increment, appended after the frozen argv baseline); the
+guest-side `infra/init` starts `/tools/virtuoso-agent` via `/init-hooks.sh`;
+the agent receives line-based JSON commands on the virtio-serial and answers
+with line-based JSON events (a structured event stream, not simulated
+keystrokes on a terminal); on the host side the event stream is persisted to
+the run directory as `agent-events.jsonl`.
 
 ```bash
 virtuoso probe --cmd 'uname -a' --cmd 'dmesg | tail'
-virtuoso probe --cmd-file cmds.txt --json    # 机器可读事件流，供 AI 管道消费
+virtuoso probe --cmd-file cmds.txt --json    # machine-readable event stream, for AI pipelines to consume
 ```
 
-`--timeout` 覆盖墙钟总超时（含 TCG 引导与握手）；退出码语义 0/1/124。
-probe 运行也写 run 目录（`serial.log` + `qemu-stderr.log` +
-`agent-events.jsonl`，无 verdict）。
+`--timeout` overrides the total wall-clock timeout (including TCG boot and
+handshake); exit code semantics are 0/1/124. A probe run also writes a run
+directory (`serial.log` + `qemu-stderr.log` + `agent-events.jsonl`, with no
+verdict).
 
-限制：通道依赖 tools.img 供给（agent 二进制在工具盘里）。
+Limitation: the channel depends on the tools.img provisioning (the agent
+binary lives on the tools disk).
 
-## vfio — PCI 直通
+## vfio — PCI passthrough
 
-把宿主物理 PCI 设备直通给 guest：每个 BDF 生成一条
-`-device vfio-pci,host=<bdf>`（追加在 argv 冻结基线之后）。
+Passes host physical PCI devices through to the guest: each BDF emits one
+`-device vfio-pci,host=<bdf>` (appended after the frozen argv baseline).
 
 ```toml
 [components.vfio]
 enabled = true
-devices = ["0000:01:00.0"]        # 宿主设备的 BDF 列表（lspci 查）
-require = ["vfio", "vfio_pci"]    # guest 内核 =m 时声明
-stage = "boot"                    # root 挂载前就要 → boot（缺省 runtime）
+devices = ["0000:01:00.0"]        # BDFs of the host devices (look them up with lspci)
+require = ["vfio", "vfio_pci"]    # declare when the guest kernel has them as =m
+stage = "boot"                    # needed before root is mounted → boot (default runtime)
 ```
 
-前置要求：
+Prerequisites:
 
-- **宿主开 IOMMU**：x86_64 内核参数 `intel_iommu=on`（或 `amd_iommu`）；
-  arm64 需要 SMMU 平台。
-- 设备已绑定宿主 `vfio-pci` 驱动（`driverctl` 或手动解绑再绑）。
-- guest 内核侧 `vfio` / `vfio_pci` 可用：`=y` 无需声明，`=m` 时写进 `require`
-  （直通设备若要在 root 挂载前就绪，加 `stage = "boot"`）。
+- **IOMMU enabled on the host**: x86_64 kernel parameter `intel_iommu=on`
+  (or `amd_iommu`); arm64 needs an SMMU platform.
+- The device is bound to the host `vfio-pci` driver (via `driverctl`, or a
+  manual unbind then rebind).
+- `vfio` / `vfio_pci` available in the guest kernel: with `=y` no declaration
+  is needed; with `=m` list them in `require` (if the passthrough device must
+  be ready before root is mounted, add `stage = "boot"`).
 
-限制：
+Limitations:
 
-- **仅 Linux 宿主**——vfio-pci 直通架构性依赖 Linux IOMMU，macOS 上 doctor
-  直接拒绝。
-- 直通设备参数由装配点单独追加，不混入 `qemu_opts` 透传链（避免与本组件
-  的逐设备条目重复）。
+- **Linux hosts only** — vfio-pci passthrough architecturally depends on the
+  Linux IOMMU; on macOS doctor rejects it outright.
+- Passthrough device arguments are appended separately at the assembly point,
+  not mixed into the `qemu_opts` pass-through chain (avoiding duplicates with
+  this component's per-device entries).
 
-## numa — 多节点拓扑
+## numa — Multi-node topology
 
-多节点 NUMA 拓扑：每节点一个 socket，guest 内可见真实的节点/内存 locality。
+Multi-node NUMA topology: one socket per node, with real node/memory locality
+visible inside the guest.
 
 ```toml
-smp = 8                            # 全局键：vCPU 总数
+smp = 8                            # global key: total vCPU count
 
-[components.numa]                  # 段缺省（或 enabled=false）= 单节点
+[components.numa]                  # section default (or enabled=false) = single node
 enabled = true
 nodes = 2
 memory_per_node = "1G"
 ```
 
-约束（解析期校验，启动期拒绝）：
+Constraints (validated at parse time, rejected at launch time):
 
-- `smp` 必须被 `nodes` **整除**（解析期报错；launcher 二次校验）；
-- 单节点（组件关闭）时不传 `-numa`，argv 保持冻结基线；
-- 总内存 = `nodes × memory_per_node`。
+- `smp` must be evenly divisible by `nodes` (parse-time error; the launcher
+  double-checks);
+- with a single node (component off), no `-numa` is passed and argv keeps the
+  frozen baseline;
+- total memory = `nodes × memory_per_node`.
 
-launcher 为每个节点生成一个 socket（CPU 与 memory-backend 一一对应），
-`-smp` 取全局值。交叉架构 / 无 KVM 时照常工作（TCG 也支持 NUMA 拓扑）。
+The launcher generates one socket per node (CPUs and memory backends map
+one-to-one), and `-smp` takes the global value. Works as usual across
+architectures / without KVM (TCG also supports NUMA topologies).
 
-## pmem — 持久内存
+## pmem — Persistent memory
 
-guest 内的持久内存区域：`/dev/pmem0` + DAX，写入对宿主文件持久落盘。
-**仅 arm64 / riscv64**（走设备树途径）。
-
-```toml
-[components.pmem]                  # 段缺省 = 关闭
-enabled = true
-size = "256M"                      # 从 guest RAM 顶部挖出（须小于总内存）
-require = ["libnvdimm", "nd_btt", "of_pmem", "nd_pmem"]   # 内核 =m 时声明（含顺序）
-```
-
-`require` 是实测最小集：`nd_btt` 对 `libnvdimm` 是硬依赖，顺序错或缺失会
-insmod 失败。内核把这些选项编成 `=y` 时无需声明。
-
-工作方式（DT 途径三件套）——QEMU 的 NFIT/NVDIMM 途径需要 EFI，openEuler 的
-QEMU 又没有 virtio-pmem，所以走**设备树**。launcher 在启动前生成三件套
-（落 `target/build/pmem/`）：
-
-1. **dumpdtb** 导出 QEMU 的原生设备树，`fdtput` 注入 `pmem-region` 节点
-   （of_pmem 绑定），启动时经 `-dtb` 回写；
-2. **cmdline 追加 `mem=<总内存 − pmem 区>`**：把区间排除出内核线性内存
-   模型，`devm_memremap_pages` 才能建 ZONE_DEVICE（不排除会 no-map 冲突
-   EEXIST）；
-3. **主内存后端换宿主文件**（memory-backend-file）：guest 对该区间的写入
-   由 KVM 直接落到宿主文件，即持久化。
-
-guest 内：`/dev/pmem0` 出现后即可 mkfs / dax 挂载，重跑 VM 数据仍在。
-
-限制：仅 arm64 / riscv64（DT 途径），x86_64 无此途径；`size` 必须小于
-总内存，否则解析期拒绝；macOS 上为 experimental（doctor WARN），链路
-（memory-backend-file + dumpdtb/fdtput）未经 HVF 实测前不要依赖。
-
-## bpf — bpftrace 观测
-
-eBPF 内核观测：bpftrace 随 tools 盘供给，VM 内 `/tools/bin/bpftrace` 直跑
-（PATH 已由 tools 盘注入），one-liner 输出经 agent 通道或串口回宿主。
-
-程序态观测（加载现成 `.bpf.o` 的 `bpf-run`）**常驻 tools 盘 `/bin`，与
-本组件开关无关、恒默认可用**——bpftrace 负责脚本态临时探索，bpf-run
-负责编译好的 BPF 程序的结构化事件流，用法见
-[AI 集成 · eBPF 观测](../usage/ai-integration.md#ebpf-观测程序态)。
-
-`bpftool` 同样**常驻 `/bin`、与组件开关无关**：`virtuoso kernel build`
-从内核树顺带静态构建（in-tree libbpf 同树链入，版本与被测内核严格匹配），
-builder 搬运随 tools 盘——`btf dump` / `prog` / `map` 检视的内核开发控制
-面。内核树内无产物（未跑 kernel build，或目标 arch 与工具链容器不同构）
-时 WARN 跳过，不挡主流程。
+A persistent memory region inside the guest: `/dev/pmem0` + DAX; writes
+persist to a host file. **arm64 / riscv64 only** (via the device tree).
 
 ```toml
-[components.bpf]                   # 段缺省 = 关闭
+[components.pmem]                  # section default = off
+enabled = true
+size = "256M"                      # carved out of the top of guest RAM (must be smaller than total memory)
+require = ["libnvdimm", "nd_btt", "of_pmem", "nd_pmem"]   # declare when the kernel has them as =m (order included)
+```
+
+`require` is the smallest set verified by testing: `nd_btt` is a hard
+dependency of `libnvdimm`; a wrong order or an omission makes insmod fail.
+When the kernel builds these options `=y`, no declaration is needed.
+
+How it works (the device-tree trio) — QEMU's NFIT/NVDIMM route needs EFI, and
+openEuler's QEMU has no virtio-pmem either, so this goes through the **device
+tree**. The launcher generates the trio before boot (into
+`target/build/pmem/`):
+
+1. **dumpdtb** exports QEMU's native device tree and `fdtput` injects the
+   `pmem-region` node (the of_pmem binding), written back at boot via `-dtb`;
+2. **cmdline append `mem=<total memory − pmem region>`**: excludes the region
+   from the kernel's linear memory model so that `devm_memremap_pages` can
+   create ZONE_DEVICE (without the exclusion, no-map conflicts with EEXIST);
+3. **the main memory backend switches to a host file**
+   (memory-backend-file): guest writes to the region land directly in the
+   host file via KVM — that is the persistence.
+
+Inside the guest: once `/dev/pmem0` appears you can mkfs / mount with dax;
+data survives VM reruns.
+
+Limitations: arm64 / riscv64 only (device-tree route); x86_64 has no such
+route; `size` must be smaller than total memory, otherwise the parse-time
+check rejects it; on macOS this is experimental (doctor WARN) — do not rely
+on the chain (memory-backend-file + dumpdtb/fdtput) until it has been tested
+under HVF.
+
+## bpf — bpftrace observability
+
+eBPF kernel observability: bpftrace ships with the tools disk and runs
+directly in the VM at `/tools/bin/bpftrace` (PATH already injected by the
+tools disk); one-liner output returns to the host via the agent channel or
+the serial console.
+
+Program-mode observation (`bpf-run`, which loads ready-made `.bpf.o`) is
+**always resident on the tools disk at `/bin`, independent of this component's
+switch, available by default** — bpftrace handles script-mode ad-hoc
+exploration, bpf-run handles structured event streams for compiled BPF
+programs; for usage see
+[AI Integration · eBPF observation](../usage/ai-integration.md#ebpf-observation-program-mode).
+
+`bpftool` is likewise **resident at `/bin`, independent of the component
+switch**: `virtuoso kernel build` builds it statically along the way from the
+kernel tree (in-tree libbpf linked from the same tree, version strictly
+matching the kernel under test), and the builder ferries it onto the tools
+disk — the kernel-development control plane for `btf dump` / `prog` / `map`
+inspection. When the kernel tree has no products (kernel build not run, or
+the target arch differs from the toolchain container), it WARNs and skips
+without blocking the main flow.
+
+```toml
+[components.bpf]                   # section default = off
 enabled = true
 ```
 
-供给形态：官方 Release 的 AppImage（自含 Nix 闭包，内嵌 LLVM/clang），
-**build 期**在容器内解包成纯文件树放入 tools 盘 `/tools/nix`（需要 docker，
-与 kernel 供给同依赖），VM 内 `ln -s /tools/nix /nix` 后直跑 store 二进制
-—— 零运行时解包、零额外内存。首次启用下载 ~190M 并解包，之后缓存复用
-（`target/build/bpftrace/`），tools.img 增至 ~600M。
+Provisioning shape: the official Release's AppImage (a self-contained Nix
+closure with embedded LLVM/clang), **unpacked at build time** inside the
+container into a pure file tree placed on the tools disk at `/tools/nix`
+(needs docker, same dependency as kernel provisioning); inside the VM,
+`ln -s /tools/nix /nix` and the store binaries run directly — zero runtime
+unpacking, zero extra memory. The first enablement downloads ~190M and
+unpacks it; afterwards it is cached and reused (`target/build/bpftrace/`),
+growing tools.img to ~600M.
 
-内核侧要求 BPF/BTF（`CONFIG_BPF_SYSCALL` / `DEBUG_INFO_BTF` 等），
-openEuler defconfig 缺省即开，无需重建内核。观测入口示例：
+The kernel side requires BPF/BTF (`CONFIG_BPF_SYSCALL` / `DEBUG_INFO_BTF`
+etc.); the openEuler defconfig has these on by default, so no kernel rebuild
+is needed. Example observation entry point:
 
 ```bash
 virtuoso probe --cmd 'bpftrace -e "kprobe:handle_mm_fault { @faults[comm]++ } \
   interval:s:2 { print(@faults); } interval:s:8 { exit(); }"'
 ```
 
-限制：仅 arm64 / x86_64（官方无 riscv64 资产）；bpftrace 0.27 的 `count()`
-走 stdlib 宏有展开缺陷，用 `@[comm]++` 等价写法替代。
+Limitations: arm64 / x86_64 only (no official riscv64 assets); bpftrace
+0.27's `count()` goes through a stdlib macro with an expansion defect — use
+the equivalent `@[comm]++` form instead.

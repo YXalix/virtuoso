@@ -1,12 +1,12 @@
-//! 配置诊断呈现（`virtuoso doctor --verbose` 的全量输出）。
-//! 从 config 层拆出：config 只管解析与取值，本模块负责打印。
+//! Config diagnostics rendering (the full output of `virtuoso doctor --verbose`).
+//! Split out from the config layer: config only parses and resolves values; this module prints.
 
 use crate::launcher::NumaTopology;
 use crate::Arch;
 
 use crate::config::Config;
 
-/// 类型化配置诊断。
+/// Typed config diagnostics.
 pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
     println!("[CONFIG] Virtuoso — typed config diagnostics");
     match &cfg.toml_path() {
@@ -14,7 +14,7 @@ pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
         None => println!("  virtuoso.toml: absent (built-in defaults; a fully commented template ships at the repo root)"),
     }
 
-    // 架构
+    // Architecture
     let arch_raw = arch_override.map(str::to_string).or_else(|| cfg.arch_str());
     let host = Arch::host_default();
     match arch_raw.as_deref().and_then(Arch::parse).or(host) {
@@ -53,7 +53,7 @@ pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
         }
     }
 
-    // 内核路径与镜像
+    // Kernel path and image
     match cfg.kernel_path() {
         Ok((kp, source)) => {
             println!("  kernel_path: {} ({source})", kp.display());
@@ -88,7 +88,7 @@ pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
         Err(e) => println!("  WARN: {e}"),
     }
 
-    // 超时
+    // Timeout
     let t = cfg.timeout_raw();
     println!(
         "  timeout: {t}s{}",
@@ -99,7 +99,7 @@ pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
         }
     );
 
-    // QEMU 二进制
+    // QEMU binary
     if let Some(arch) = cfg.arch() {
         let override_q = cfg.qemu_override();
         let found = match &override_q {
@@ -117,7 +117,7 @@ pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
         );
     }
 
-    // 组件
+    // Components
     let mut comps: Vec<String> = Vec::new();
     comps.push(format!(
         "tools_disk={}",

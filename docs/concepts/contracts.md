@@ -1,71 +1,76 @@
-# 冻结契约
+# Frozen Contracts
 
-以下接口对外冻结：改动任何一条都会破坏下游（CI、AI skill、脚本管道）的解析，
-演进必须走新版本协议，不许原地改语义。
+The following interfaces are frozen externally: changing any one of them
+breaks downstream parsing (CI, AI skills, script pipelines). Evolution must go
+through a new protocol version; semantics may not be changed in place.
 
-| 维度 | 契约 |
+| Dimension | Contract |
 |---|---|
-| 串口标记协议 | v1 冻结（附录）：改动文本等于破坏所有下游解析 |
-| 退出码 | 0=通过、124=超时（137 归一）、其余=失败 |
-| QEMU argv | 缺省（无数据盘、无 agent）输出与**宿主平台各自的冻结基线**逐字一致，由平台基线单测钉死 |
-| 静态链接 | 测试必须 `-static`；禁止 `\|\| true` 掩盖失败 |
-| 配置优先级 | 标量键：进程环境变量 > `virtuoso.toml`（同名键 env 覆盖） |
-| AI 接口 | skill 只依赖标记协议 v1 与工件 schema（verdict.json / events.jsonl），不依赖 harness 内部实现 |
+| Serial marker protocol | v1 frozen (appendix): changing the text breaks all downstream parsing |
+| Exit codes | 0 = passed, 124 = timeout (137 normalized), anything else = failure |
+| QEMU argv | with defaults (no data disk, no agent) the output matches the **frozen baseline of the respective host platform** verbatim, pinned by platform baseline unit tests |
+| Static linking | tests must be `-static`; masking failures with `\|\| true` is forbidden |
+| Configuration precedence | scalar keys: process environment variables > `virtuoso.toml` (env overrides same-named keys) |
+| AI interface | skills depend only on marker protocol v1 and the artifact schemas (verdict.json / events.jsonl), never on harness internals |
 
-## 退出码语义
+## Exit Code Semantics
 
-| 退出码 | 含义 |
+| Exit code | Meaning |
 |---|---|
-| `0` | 通过（且 verdict 必须是 `passed` 才算真通过） |
-| `124` | 墙钟超时（QEMU 被 KILL；137 归一为 124） |
-| `130` | Ctrl-C 中断（工件已落盘） |
-| 其余 | 失败 |
+| `0` | passed (and the verdict must be `passed` to count as a true pass) |
+| `124` | wall-clock timeout (QEMU was KILLed; 137 is normalized to 124) |
+| `130` | interrupted by Ctrl-C (artifacts already persisted to disk) |
+| other | failure |
 
-注意：`-no-reboot` 下内核 panic 会让 QEMU 以 **exit 0** 退出——退出码只是
-接口契约，判定以 `verdict.json` 为准。
+Note: under `-no-reboot`, a kernel panic makes QEMU exit with **exit 0** —
+the exit code is only an interface contract; judging goes by `verdict.json`.
 
-## argv 冻结基线
+## The Frozen argv Baseline
 
-缺省形态（无数据盘、无 agent 通道）下 QEMU argv 与既定基线**逐字一致**，
-由平台基线单测显式钉死。**基线按宿主平台各持一份**（宿主平台类型钉死判定，
-不随编译目标漂移）：两平台的差异面收敛在两处——
+In the default shape (no data disk, no agent channel) the QEMU argv matches
+the established baseline **verbatim**, pinned explicitly by platform baseline
+unit tests. **Each host platform keeps its own baseline** (the host platform
+type pins the verdict; it does not drift with the compilation target): the
+differences between the two platforms converge to two places —
 
-| 段 | Linux | macOS（Darwin） |
+| Segment | Linux | macOS (Darwin) |
 |---|---|---|
-| 内存后端 | `memory-backend-memfd,…,share=off` | `memory-backend-ram,…`（QEMU 无 memfd） |
-| 硬件加速 | `shell --kvm` → `-enable-kvm`；test 恒 TCG（无 accel flag） | 同构 guest 缺省/`--tcg` 之外的路径 → `-accel hvf`；`--tcg` 强制纯模拟；accel × 平台错配（KVM@mac、HVF@linux）在 argv 构造期报错 |
+| Memory backend | `memory-backend-memfd,…,share=off` | `memory-backend-ram,…` (QEMU has no memfd) |
+| Hardware acceleration | `shell --kvm` → `-enable-kvm`; test always TCG (no accel flag) | paths other than the same-architecture guest default/`--tcg` → `-accel hvf`; `--tcg` forces pure emulation; accel × platform mismatches (KVM@mac, HVF@linux) error at argv construction time |
 
-数据盘（tools.img 等）与 agent 串口属调用方增量，追加在基线之后。人工复核：
+Data disks (tools.img etc.) and the agent serial line are caller increments,
+appended after the baseline. For manual review:
 
 ```bash
-QEMU=echo virtuoso shell    # 只打印 argv，不启动 QEMU
+QEMU=echo virtuoso shell    # only prints the argv, does not start QEMU
 ```
 
-## 附录：串口标记协议 v1（冻结文本）
+## Appendix: Serial Marker Protocol v1 (Frozen Text)
 
 ```text
-# 测试二进制汇编层（infra/init 打印）
+# test binary aggregation layer (printed by infra/init)
 --- Running: <name> ---
 PASSED: <name>
 FAILED: <name>
 
-# 单断言行（测试二进制内打印）
+# individual assertion lines (printed inside the test binary)
 [PASS] <message>
 [FAIL] <message>
 [SKIP] <message>
 [INFO] <message>
 
-# 单二进制汇总（init 依各用例退出码汇编）
+# per-binary summary (init assembles it from each case's exit code)
 Test Results: <N>/<M> passed
 
-# 全局终止标记（harness 判定依据）
+# global termination marker (the harness's judging basis)
 TEST_COMPLETE: ALL TESTS PASSED     # → exit 0
 TEST_COMPLETE: SOME TESTS FAILED    # → exit 1
 
-# 超时（宿主侧判定）
-exit 124   # wallclock timeout（内核挂死 / runaway loop）
+# timeout (decided on the host side)
+exit 124   # wallclock timeout (kernel hang / runaway loop)
 ```
 
-判定引擎对以上标记逐行解析为结构化事件。用例侧只依赖 `[PASS]` 等断言宏，
-汇编层标记由 `infra/init` 输出。编写测试见
-[编写测试用例](../usage/writing-tests.md)。
+The judging engine parses the markers above line by line into structured
+events. Test cases depend only on assertion macros such as `[PASS]`; the
+aggregation-layer markers are emitted by `infra/init`. To write tests, see
+[Writing Test Cases](../usage/writing-tests.md).

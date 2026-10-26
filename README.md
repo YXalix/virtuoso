@@ -1,47 +1,51 @@
-# Virtuoso — 内核 E2E 虚拟化测试装置
+# Virtuoso — Kernel E2E Virtualization Test Harness
 
-内核 E2E 虚拟化测试装置：把 freshly-built 内核直接启动在 QEMU 里跑真实测试
-程序，一条命令回答 *"does my patch actually work?"*。
+A kernel E2E virtualization test harness: boot a freshly-built kernel directly in
+QEMU and run real test programs, answering *"does my patch actually work?"* with a
+single command.
 
-构建（builder）、启动与进程治理（launcher）、判定（judge）、容器化内核供给
-（forge）全部在单包 Rust crate 中，`virtuoso` 是唯一 CLI 入口。
+Build (builder), launch and process governance (launcher), judging (judge), and
+containerized kernel provisioning (forge) all live in a single-package Rust crate;
+`virtuoso` is the only CLI entry point.
 
-**📖 在线文档：<https://yxalix.github.io/virtuoso/>**
+**📖 Online docs: <https://yxalix.github.io/virtuoso/>**
 
-## 快速开始
+## Quick Start
 
-从零上手见[快速开始](https://yxalix.github.io/virtuoso/quick-start.html)。
-装置设计为放进内核源码树内运行（如 `kernel/virtuoso/`），放别处时在
-`virtuoso.toml` 设 `kernel_path`。
+See [Quick Start](https://yxalix.github.io/virtuoso/quick-start.html) to get started
+from scratch. The harness is designed to be placed inside a kernel source tree
+(e.g. `kernel/virtuoso/`); when placed elsewhere, set `kernel_path` in
+`virtuoso.toml`.
 
 ```bash
-cargo install --path .      # 规范二进制 virtuoso 装入 PATH
-virtuoso doctor             # 一屏环境体检（✓/✗ 组件行；--verbose 全量）
-virtuoso test --timeout 60  # 构建 → 启动 → 判定 → 工件落盘
+cargo install --path .      # installs the canonical binary virtuoso into PATH
+virtuoso doctor             # one-screen environment health check (✓/✗ component lines; --verbose for full detail)
+virtuoso test --timeout 60  # build → launch → judge → write artifacts to disk
 ```
 
-## 常用命令
+## Common Commands
 
-| 命令 | 作用 |
+| Command | Purpose |
 |---|---|
-| `virtuoso doctor` | 一屏环境体检（`--verbose` 全量诊断，`--json` 机器可读） |
-| `virtuoso build` | 重建 initrd.img / rootfs.img / tools.img |
-| `virtuoso shell [--kvm] [--gdb]` | 交互式 VM（BusyBox shell）；`--gdb` GDB stub `:1234` 挂起启动 |
-| `virtuoso test [--arch a] [--replay-until-fail N]` | 构建 → 启动 → 判定；`--replay-until-fail` flaky 返场 |
-| `virtuoso probe --cmd '…'` | AI 交互通道（virtio-serial agent 命令批） |
+| `virtuoso doctor` | One-screen environment health check (`--verbose` for full diagnostics, `--json` for machine-readable output) |
+| `virtuoso build` | Rebuild initrd.img / rootfs.img / tools.img |
+| `virtuoso shell [--kvm] [--gdb]` | Interactive VM (BusyBox shell); `--gdb` suspends boot at the GDB stub `:1234` |
+| `virtuoso test [--arch a] [--replay-until-fail N]` | build → launch → judge; `--replay-until-fail` reruns for flaky cases |
+| `virtuoso probe --cmd '…'` | AI interaction channel (virtio-serial agent command batch) |
 
-## 文档
+## Documentation
 
-`docs/` 是文档唯一事实来源，经 mdBook 发布到 GitHub Pages；本地
-`mdbook build docs` 构建，push main 自动更新站点。
+`docs/` is the single source of truth for documentation, published to GitHub Pages
+via mdBook; build locally with `mdbook build docs`; pushing main updates the site
+automatically.
 
-- [快速开始](docs/quick-start.md) — 从零到第一个 `verdict: passed`
-- [设计与理念](docs/concepts/design.md) — 设计原则、架构总览、[冻结契约](docs/concepts/contracts.md)、[组件机制](docs/concepts/components.md)
-- [使用](docs/usage/cli.md) — CLI、[配置](docs/usage/configuration.md)、[编写测试](docs/usage/writing-tests.md)、[调试](docs/usage/debugging.md)、[工件与分诊](docs/usage/artifacts.md)
-- [两段式引导](docs/concepts/boot.md) — 引导架构、"改哪个文件"手册、内核怪癖表
-- [故障排查](docs/usage/troubleshooting.md) — Symptom → Solution 速查
-- [AGENTS.md](AGENTS.md) — AI 面向的仓库地图与不变量
+- [Quick Start](docs/quick-start.md) — from zero to the first `verdict: passed`
+- [Design and Philosophy](docs/concepts/design.md) — design principles, architecture overview, [frozen contracts](docs/concepts/contracts.md), [component mechanics](docs/concepts/components.md)
+- [Usage](docs/usage/cli.md) — CLI, [configuration](docs/usage/configuration.md), [writing tests](docs/usage/writing-tests.md), [debugging](docs/usage/debugging.md), [artifacts and triage](docs/usage/artifacts.md)
+- [Two-Stage Boot](docs/concepts/boot.md) — boot architecture, a "which file to change" handbook, the kernel quirk table
+- [Troubleshooting](docs/usage/troubleshooting.md) — Symptom → Solution quick reference
+- [AGENTS.md](AGENTS.md) — AI-facing repository map and invariants
 
 ## License
 
-[MIT](LICENSE)。
+[MIT](LICENSE).

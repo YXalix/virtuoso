@@ -1,13 +1,13 @@
-# mdBook 配置（文档站自包含在 docs/ 内，书根 = docs/，src 指向自身）。
-# docs/*.md 是文档唯一事实来源，本文件只描述"怎么呈现"。
-# 本地构建：mdbook build docs（产物仍在仓库根 target/book，git 忽略）；
-# 线上发布：push main 自动构建到 gh-pages（.github/workflows/docs.yml）。
+# mdBook configuration (the docs site is self-contained in docs/, book root = docs/, src points at itself).
+# docs/*.md is the single source of truth for documentation; this file only describes "how it is presented".
+# Local build: mdbook build docs (output still lands in repo-root target/book, git-ignored);
+# Online publishing: pushing main automatically builds to gh-pages (.github/workflows/docs.yml).
 
 [book]
-title = "Virtuoso — 内核 E2E 虚拟化测试装置"
+title = "Virtuoso — Kernel E2E Virtualization Test Harness"
 authors = ["YXalix"]
-description = "内核 E2E 虚拟化测试装置：构建、启动、判定、治理、跨 run 聚类"
-language = "zh-CN"
+description = "Kernel E2E virtualization test harness: build, launch, judge, govern, cluster across runs"
+language = "en"
 src = "."
 
 [build]

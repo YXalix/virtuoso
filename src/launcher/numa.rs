@@ -1,12 +1,12 @@
-//! NUMA 拓扑：`nodes` × `memory_per_node`，`smp` 必须被 nodes 整除
-//! （非法配置在解析期报错，而非运行时）。
+//! NUMA topology: `nodes` × `memory_per_node`; `smp` must be divisible by nodes
+//! (invalid configs error at parse time, not at runtime).
 
-/// NUMA 拓扑。
+/// NUMA topology.
 #[derive(Debug, Clone)]
 pub(crate) struct NumaTopology {
     pub smp: u32,
     pub nodes: u32,
-    /// 每节点内存，如 "1G"；总内存 = per-node × nodes
+    /// Memory per node, e.g. "1G"; total memory = per-node × nodes
     pub memory_per_node: String,
 }
 
@@ -36,9 +36,10 @@ impl NumaTopology {
         })
     }
 
-    /// 总内存字符串（run-qemu.sh 的乘法规则：数字前缀 × 节点数，保留单位后缀）。
+    /// Total memory string (run-qemu.sh's multiplication rule: numeric prefix × node
+    /// count, unit suffix preserved).
     pub(crate) fn total_memory(&self) -> anyhow::Result<String> {
-        // common 零依赖保留 String 错误面，此处上收为 anyhow
+        // common keeps a zero-dep String error surface; lifted to anyhow here
         let (n, unit) =
             crate::util::parse_memory(&self.memory_per_node).map_err(anyhow::Error::msg)?;
         let total = n.saturating_mul(self.nodes as u64);

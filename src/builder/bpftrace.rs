@@ -1,19 +1,27 @@
-//! bpftrace 供给（[components.bpf]，默认关）：GitHub Release 官方 AppImage
-//! → 下载缓存 → 容器内解包成 Nix 闭包树 tar → tools 盘 `/tools/nix` 直跑。
+//! bpftrace provisioning ([components.bpf], off by default): official
+//! AppImage from a GitHub Release → download cache → unpacked in a
+//! container into a Nix closure tree tar → run directly from the tools
+//! disk at `/tools/nix`.
 //!
-//! Release 资产（`bpftrace-aarch64` 等）是 AppImage：ELF runtime + 追加的
-//! squashfs 载荷，载荷内是动态链接 LLVM/clang 的 Nix 闭包 —— 官方所称
-//! "statically built" 指自含闭包，并非静态 ELF。VM 无 FUSE 裸跑不了；
-//! 解包走容器：`--appimage-extract` 是纯用户态解包，不依赖 FUSE/内核
-//! squashfs。
+//! Release assets (`bpftrace-aarch64` etc.) are AppImages: an ELF
+//! runtime + an appended squashfs payload, where the payload is a Nix
+//! closure with dynamically linked LLVM/clang — the official "statically
+//! built" claim means a self-contained closure, not a static ELF. A bare
+//! VM without FUSE cannot run it; extraction goes through a container:
+//! `--appimage-extract` is pure userspace extraction, independent of
+//! FUSE/kernel squashfs.
 //!
-//! 解包必须在**容器 overlay**（Linux ext4，大小写敏感）里完成、以单文件
-//! tar 流回宿主：Nix 树含 Eterm/eterm 等大小写碰撞对（ncurses terminfo），
-//! 直接解到 macOS 宿主目录会在 OrbStack virtiofs 上以 EACCES 中途夭折。
-//! 碰撞对仅剩装饰性条目在装载时合并（host tar 落 APFS 静默同名覆盖），
-//! 不影响 bpftrace 运行。符号链接经 tar 原样保留、mke2fs -d 原样进 ext4；
-//! Nix 绝对路径符号链接（interpreter/RPATH = /nix/store/...）在 VM 内由
-//! wrapper `ln -s /tools/nix /nix` 兑现：零运行时解包、零 tmpfs。
+//! Extraction must happen inside a **container overlay** (Linux ext4,
+//! case-sensitive) and stream back to the host as a single-file tar: the
+//! Nix tree contains case-collision pairs such as Eterm/eterm (ncurses
+//! terminfo); extracting directly into a macOS host directory dies midway
+//! with EACCES on OrbStack virtiofs. Collision pairs reduce to decorative
+//! entries merged at load time (host tar landing on APFS silently
+//! overwrites same-named paths) and do not affect bpftrace operation.
+//! Symbolic links pass through tar verbatim and enter ext4 unchanged via
+//! mke2fs -d; Nix absolute-path symlinks (interpreter/RPATH =
+//! /nix/store/...) are satisfied inside the VM by the wrapper's
+//! `ln -s /tools/nix /nix`: zero runtime unpacking, zero tmpfs.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -26,27 +34,28 @@ use crate::util::Progress;
 
 pub(crate) const VERSION: &str = "0.27.0";
 const REPO: &str = "bpftrace/bpftrace";
-/// 解包容器镜像：只需 sh + tar + 静态 AppImage runtime，alpine 足够
-/// （`docker run` 缺本地镜像时自动拉取）。
+/// Container image for extraction: only sh + tar + the static AppImage
+/// runtime are needed, alpine suffices (`docker run` auto-pulls when the
+/// local image is missing).
 const EXTRACT_IMAGE: &str = "alpine:latest";
 
-/// Release 资产的架构后缀（官方只发 aarch64/x86_64）。
+/// Architecture suffix of release assets (official releases ship aarch64/x86_64 only).
 fn release_arch(arch: Arch) -> anyhow::Result<&'static str> {
     match arch {
         Arch::Arm64 => Ok("aarch64"),
         Arch::X86_64 => Ok("x86_64"),
         Arch::Riscv64 => Err(anyhow!(
-            "bpftrace 官方 Release 无 riscv64 资产，components.bpf 暂不支持该架构"
+            "official bpftrace releases have no riscv64 asset; components.bpf does not support this arch yet"
         )),
     }
 }
 
-/// 供给缓存根：`target/build/bpftrace/bpftrace-<version>/`（版本进缓存键）。
+/// Provisioning cache root: `target/build/bpftrace/bpftrace-<version>/` (version is part of the cache key).
 fn cache_dir(build_dir: &Path) -> PathBuf {
     build_dir.join("bpftrace").join(format!("bpftrace-{VERSION}"))
 }
 
-/// 确保解包树缓存就绪，返回缓存 tar 路径。失败即 Err（构建中止）。
+/// Ensures the extracted-tree cache is ready and returns the cached tar path. Any failure is an Err (build aborts).
 pub(crate) fn ensure(
     build_dir: &Path,
     arch: Arch,
@@ -70,8 +79,8 @@ pub(crate) fn ensure(
         if !crate::builder::busybox::fetch(&url, &tmp) || !crate::util::is_elf(&tmp) {
             let _ = std::fs::remove_file(&tmp);
             anyhow::bail!(
-                "bpftrace {asset} 下载失败（{url}）。\n  \
-                 检查网络/代理，或手动放置缓存 {appimage}",
+                "bpftrace {asset} download failed ({url}).\n  \
+                 check network/proxy, or manually place the cache file {appimage}",
                 appimage = appimage.display()
             );
         }
@@ -81,12 +90,12 @@ pub(crate) fn ensure(
 
     progress.line("bpftrace: extracting AppImage (container) ...");
     extract_to_tar(&dir, &appimage, &tar)
-        .context("bpftrace: AppImage 容器内解包失败（components.bpf 需要 docker，与 kernel 供给同依赖）")?;
+        .context("bpftrace: failed to extract AppImage in container (components.bpf needs docker, same dependency as kernel provisioning)")?;
     progress.line(&format!("bpftrace: v{VERSION} ready"));
     Ok(tar)
 }
 
-/// 装入 tools 盘 staging：缓存 tar 解开 → `/tools/nix`，wrapper → `/tools/bin/bpftrace`。
+/// Installs into the tools disk staging: cached tar unpacked → `/tools/nix`, wrapper → `/tools/bin/bpftrace`.
 pub(crate) fn install(tools_dir: &Path, tar: &Path, progress: &mut Progress) -> anyhow::Result<()> {
     let status = Command::new("tar")
         .args(["-xzf"])
@@ -94,13 +103,13 @@ pub(crate) fn install(tools_dir: &Path, tar: &Path, progress: &mut Progress) -> 
         .arg("-C")
         .arg(tools_dir)
         .status()
-        .context("host tar 不可用")?;
+        .context("host tar unavailable")?;
     anyhow::ensure!(
         status.success(),
-        "bpftrace: 缓存 tar 解包失败（{}）",
+        "bpftrace: failed to unpack cached tar ({})",
         tar.display()
     );
-    let bin = store_bin(tools_dir).context("bpftrace: 解包树内未找到 store 二进制")?;
+    let bin = store_bin(tools_dir).context("bpftrace: store binary not found in extracted tree")?;
     let rel = bin.strip_prefix(tools_dir)?;
     std::fs::create_dir_all(tools_dir.join("bin"))?;
     let wrapper = tools_dir.join("bin/bpftrace");
@@ -110,7 +119,7 @@ pub(crate) fn install(tools_dir: &Path, tar: &Path, progress: &mut Progress) -> 
     Ok(())
 }
 
-/// 解包树内真二进制（nix/store/<hash>-bpftrace/bin/bpftrace）。
+/// The real binary inside the extracted tree (nix/store/<hash>-bpftrace/bin/bpftrace).
 fn store_bin(tools_dir: &Path) -> Option<PathBuf> {
     let store = tools_dir.join("nix/store");
     let mut entries: Vec<_> = std::fs::read_dir(&store).ok()?.flatten().collect();
@@ -127,23 +136,26 @@ fn store_bin(tools_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// wrapper：VM 内自举两个链接后直跑 store 二进制。
-/// `/dev/fd` —— devtmpfs 不建此约定链接，clang 前端要写 /dev/fd/*；
-/// `/nix` —— Nix 闭包的 interpreter/RPATH 是绝对路径，闭包随 tools 盘
-/// 落位 /tools/nix。
+/// Wrapper: bootstraps two links inside the VM, then runs the store binary directly.
+/// `/dev/fd` — devtmpfs does not create this conventional link; the clang
+/// frontend writes /dev/fd/*;
+/// `/nix` — the Nix closure's interpreter/RPATH are absolute paths; the
+/// closure lands at /tools/nix with the tools disk.
 fn wrapper_script(bin_in_tools: &str) -> String {
     format!(
         "#!/bin/sh\n\
-         # bpftrace v{VERSION}（components.bpf）—— Nix 闭包随 tools 盘直跑\n\
+         # bpftrace v{VERSION} (components.bpf) — Nix closure runs directly from the tools disk\n\
          [ -e /dev/fd ] || ln -sfn /proc/self/fd /dev/fd 2>/dev/null\n\
          [ -e /nix ] || ln -sfn /tools/nix /nix 2>/dev/null\n\
          exec {bin_in_tools} \"$@\"\n"
     )
 }
 
-/// 容器内解包：AppImage 复制进 overlay（大小写敏感）解全量，`tar cz` 把
-/// nix/ 子树从 stdout 流回宿主 —— Nix 树只经 tar 字节流触达 macOS，
-/// 碰撞对在装载期由 host tar 落盘时按 APFS 语义合并。
+/// Extraction inside the container: the AppImage is copied into the overlay
+/// (case-sensitive) and fully extracted; `tar cz` streams the nix/ subtree
+/// back to the host via stdout — the Nix tree reaches macOS only as a tar
+/// byte stream; collision pairs are merged at load time by host tar per
+/// APFS semantics.
 fn extract_to_tar(dir: &Path, appimage: &Path, tar_out: &Path) -> anyhow::Result<()> {
     let script = "\
 set -e
@@ -169,8 +181,8 @@ tar cz -C squashfs-root nix
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| anyhow!("docker 不可用：{e}"))?;
-    let mut stdout = child.stdout.take().context("docker stdout 不可读")?;
+        .map_err(|e| anyhow!("docker unavailable: {e}"))?;
+    let mut stdout = child.stdout.take().context("docker stdout unreadable")?;
     let tmp = dir.join(".tree.tmp");
     let mut f = std::fs::File::create(&tmp)?;
     std::io::copy(&mut stdout, &mut f)?;
@@ -181,11 +193,11 @@ tar cz -C squashfs-root nix
     }
     anyhow::ensure!(
         out.success(),
-        "docker 解包失败：\n{}",
+        "docker extraction failed:\n{}",
         err.trim()
     );
     let size = tmp.metadata()?.len();
-    anyhow::ensure!(size > 10 * 1024 * 1024, "docker 解包产物过小（{size}B）");
+    anyhow::ensure!(size > 10 * 1024 * 1024, "docker extraction output too small ({size}B)");
     std::fs::rename(&tmp, tar_out)?;
     Ok(())
 }

@@ -1,9 +1,13 @@
-//! 用例构建脚本：通用部分在 coda-scaffold（本用例无 `c/`，编入空桩）；
-//! 额外把 `bpf/*.bpf.c` 用**宿主** clang 编成 eBPF 目标码（-target bpf），
-//! 产物经 include_bytes! 直接进用例二进制——.bpf.o 不落 rootfs，VM 内
-//! 零文件依赖。BPF 交叉与 C 测试体的 zig cc 交叉是两码事：BPF 字节码
-//! 与宿主/目标架构无关，任何装了 clang（LLVM 默认含 bpf target）的宿主
-//! 都能产，不走 CC_<TRIPLE> 注入。
+//! Test case build script: the generic part lives in coda-scaffold (this
+//! test case has no `c/`, so an empty stub is compiled in); additionally
+//! compiles `bpf/*.bpf.c` into eBPF objects with the **host** clang
+//! (-target bpf). Artifacts go straight into the test binary via
+//! include_bytes! — the .bpf.o never lands in the rootfs, so the VM has
+//! zero file dependencies. BPF cross-compilation and the C test body's zig
+//! cc cross-compilation are two different things: BPF bytecode is
+//! independent of host/target architecture; any host with clang (LLVM ships
+//! the bpf target by default) can produce it, no CC_<TRIPLE> injection
+//! involved.
 
 use std::path::PathBuf;
 
@@ -18,22 +22,25 @@ fn compile_bpf_objects() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let bpf_dir = manifest.join("bpf");
-    // 目录级 rerun：覆盖 bpf/ 下增/删/改（与 coda-scaffold 的 c/ 约定一致）
+    // Directory-level rerun: covers add/remove/modify under bpf/ (same
+    // convention as coda-scaffold's c/)
     println!("cargo:rerun-if-changed={}", bpf_dir.display());
 
     for src in bpf_sources(&bpf_dir) {
         let obj = out_dir.join(src.file_name().unwrap()).with_extension("o");
-        // -g：产 BTF（SEC(".maps") 的 BTF map 定义靠它被 aya-obj 解析）
-        // -O2：BPF 后端要求优化，未优化代码栈布局过不了编译
+        // -g: emits BTF (the SEC(".maps") BTF map definitions need it to be
+        // parsed by aya-obj)
+        // -O2: the BPF backend requires optimization; unoptimized code's
+        // stack layout fails to compile
         let status = Command::new("clang")
             .args(["-target", "bpf", "-g", "-O2", "-Wall", "-c"])
             .arg(&src)
             .arg("-o")
             .arg(&obj)
             .status()
-            .unwrap_or_else(|e| panic!("bpf: 启动 clang 失败（{e}）——BPF 目标码编译需要宿主安装 clang（LLVM 默认含 bpf target）"));
+            .unwrap_or_else(|e| panic!("bpf: failed to launch clang ({e}) -- building BPF objects requires clang on the host (LLVM ships the bpf target by default)"));
         if !status.success() {
-            panic!("bpf: 编译 {} 失败", src.display());
+            panic!("bpf: failed to compile {}", src.display());
         }
         println!("cargo:rustc-env=VIRTUOSO_BPF_{}={}", obj_name(&src), obj.display());
     }
@@ -44,7 +51,8 @@ fn bpf_sources(dir: &std::path::Path) -> Vec<PathBuf> {
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
-                // 约定：BPF 侧源文件一律 *.bpf.c（与 c/ 的 C 测试体互不混淆）
+                // Convention: BPF-side sources are always *.bpf.c (never
+                // confused with the C test bodies in c/)
                 .filter(|p| p.to_string_lossy().ends_with(".bpf.c"))
                 .collect()
         })

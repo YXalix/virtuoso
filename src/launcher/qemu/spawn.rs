@@ -1,8 +1,10 @@
-//! QEMU 进程拉起：spawn 独立进程组，收割交给 guardian（Supervised 登记）。
-//! 交互路径（stdio 继承）额外在 exec 前把控制终端前台移交给 QEMU 进程组，
-//! 会话结束由 TerminalHandover 还原——独立进程组相对终端是"后台组"，
-//! 触碰控制终端（tcsetattr 进 raw mode / 读 stdin）会被 SIGTTIN/SIGTTOU
-//! 冻结，不移交就是串口零输出 + Ctrl+C 假退出。
+//! QEMU process launch: spawn an independent process group; reaping is delegated to the
+//! guardian (Supervised registration). The interactive path (stdio inherited) additionally
+//! hands the controlling terminal's foreground to the QEMU process group before exec;
+//! TerminalHandover restores it when the session ends — an independent process group is a
+//! "background group" relative to the terminal, so touching the controlling terminal
+//! (tcsetattr into raw mode / reading stdin) gets frozen by SIGTTIN/SIGTTOU; without the
+//! handover you get zero serial output plus a fake Ctrl+C exit.
 
 use anyhow::Context;
 use std::io;
@@ -14,9 +16,10 @@ use crate::launcher::guardian::{Supervised, TerminalHandover};
 use super::QemuInvocation;
 
 impl QemuInvocation {
-    /// spawn QEMU：独立进程组（pgid = 返回的 child pid，交给 guardian 模块收割）。
-    /// `piped` = true 时 stdout/stderr 管道化（test 路径捕获串口），
-    /// false 时继承宿主 stdio（交互 shell / debug），并返回终端前台移交守卫。
+    /// Spawns QEMU: independent process group (pgid = the returned child pid, handed to
+    /// the guardian module for reaping). With `piped` = true stdout/stderr are piped (the
+    /// test path captures the serial); false inherits the host stdio (interactive shell /
+    /// debug) and returns a terminal foreground handover guard.
     pub(crate) fn spawn(
         self,
         piped: bool,
@@ -46,7 +49,7 @@ impl QemuInvocation {
         }
         let tty = if !piped { TerminalHandover::capture()? } else { None };
         if tty.is_some() {
-            // SAFETY: 闭包只做 async-signal-safe 系统调用（fork→exec 窗口的合法集）
+            // SAFETY: the closure only makes async-signal-safe syscalls (the legal fork→exec set)
             unsafe { cmd.pre_exec(hand_over_terminal_foreground) };
         }
         let child = cmd.spawn().with_context(|| {
@@ -59,35 +62,38 @@ impl QemuInvocation {
         Ok((child, pgid, tty))
     }
 
-    /// spawn 并登记监管：注册表 + 收割守卫 + 终端前台还原一步到位
-    /// （取代调用方四步样板）。
+    /// Spawns and registers supervision: registry + reaping guard + terminal foreground
+    /// restoration in one step (replacing the caller's four-step boilerplate).
     pub(crate) fn spawn_supervised(self, piped: bool) -> anyhow::Result<(Child, Supervised)> {
         let (child, pgid, tty) = self.spawn(piped)?;
         Ok((child, Supervised::adopt(pgid).with_tty(tty)))
     }
 }
 
-/// exec 前的终端前台移交：自立进程组，把控制终端前台指向本进程组。
-/// 只含 async-signal-safe 系统调用——fork 与 exec 之间唯一合法的调用集。
-/// 必须在 exec 前完成：拖到 spawn 后由父进程补做存在竞态，QEMU 先碰到
-/// 终端就被冻结。期间阻塞 SIGTTOU：此刻本组相对终端还是"后台"，
-/// 后台组调 tcsetpgrp 的内核响应即 SIGTTOU（默认动作 stop）；掩码在
-/// exec 前还原，QEMU 拿到干净起点。
+/// Terminal foreground handover before exec: forms our own process group and points the
+/// controlling terminal's foreground at it. Contains only async-signal-safe syscalls —
+/// the only legal call set between fork and exec. Must complete before exec: deferring
+/// it to a post-spawn fixup by the parent has a race; QEMU touching the terminal first
+/// gets frozen. SIGTTOU is blocked meanwhile: at this moment our group is still
+/// "background" relative to the terminal, and the kernel response to a background group
+/// calling tcsetpgrp is SIGTTOU (default action stop); the mask is restored before exec,
+/// giving QEMU a clean starting point.
 fn hand_over_terminal_foreground() -> io::Result<()> {
     set_terminal_foreground(0)
 }
 
-/// `hand_over_terminal_foreground` 的 fd 参数化内核：生产路径 fd 恒为 0
-/// （stdio 继承），预留参数化便于将来 pty 场景复用。
+/// fd-parameterized kernel of `hand_over_terminal_foreground`: the production path always
+/// uses fd 0 (stdio inherited); the parameterization is kept for reuse in future pty scenarios.
 fn set_terminal_foreground(tty_fd: libc::c_int) -> io::Result<()> {
-    // SAFETY: setpgid(0,0) 自立进程组；与 std 的 process_group(0) 幂等，
-    // 且不依赖二者先后序（tcsetpgrp 的目标组必须先成立）。
+    // SAFETY: setpgid(0,0) forms our own process group; idempotent with std's
+    // process_group(0), with no ordering dependency between the two (tcsetpgrp's target
+    // group must already exist).
     if unsafe { libc::setpgid(0, 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
     let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
     let mut saved: libc::sigset_t = unsafe { std::mem::zeroed() };
-    // SAFETY: sigset_t 清零 + sigemptyset 后使用；掩码改动仅本线程（fork 后单线程）。
+    // SAFETY: sigset_t zeroed + sigemptyset before use; mask change affects this thread only (single thread after fork).
     unsafe {
         libc::sigemptyset(&mut blocked);
         libc::sigaddset(&mut blocked, libc::SIGTTOU);
@@ -95,15 +101,16 @@ fn set_terminal_foreground(tty_fd: libc::c_int) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    // SAFETY: tcsetpgrp 只改该终端的前台进程组归属。
+    // SAFETY: tcsetpgrp only changes the terminal's foreground process group owner.
     let rc = unsafe { libc::tcsetpgrp(tty_fd, libc::getpgrp()) };
-    // SAFETY: 还原进入时掩码，exec 后 QEMU 以干净掩码起步。
+    // SAFETY: restores the entry mask; after exec QEMU starts with a clean mask.
     unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &saved, std::ptr::null_mut()) };
     if rc != 0 {
         let err = io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::ENOTTY) {
-            // fd 是 tty 但非本会话控制终端：POSIX 下读写这种终端不触发
-            // SIGTTIN/SIGTTOU，无需移交，按无终端处理。
+            // fd is a tty but not this session's controlling terminal: under POSIX,
+            // reading or writing such a terminal raises no SIGTTIN/SIGTTOU; no handover
+            // needed, treat as tty-less.
             return Ok(());
         }
         return Err(err);

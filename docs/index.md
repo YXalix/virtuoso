@@ -1,38 +1,42 @@
-# Virtuoso — 内核 E2E 虚拟化测试装置
+# Virtuoso — Kernel E2E Virtualization Test Harness
 
-Virtuoso 把 freshly-built 内核直接启动在 QEMU 里跑真实测试程序，用一条命令
-回答 **"does my patch actually work?"**——供给内核 → 构建测试固件 → 启动跑
-`/tests/` → 串口标记协议判定 → verdict 落盘。
+Virtuoso boots a freshly-built kernel directly in QEMU and runs real test
+programs against it, answering **"does my patch actually work?"** with a single
+command — provision the kernel → build the test firmware image → boot and run
+`/tests/` → judge via the serial marker protocol → persist the verdict to disk.
 
-> *内核是乐器，Virtuoso 是演奏家——每个 patch 都值得一场完整的独奏。*
+> *The kernel is the instrument, Virtuoso is the performer — every patch
+> deserves a full solo performance.*
 
-设计理念、命名故事与架构总览见[设计与理念](concepts/design.md)。
+For design philosophy, the naming story, and an architecture overview, see
+[Design and Philosophy](concepts/design.md).
 
-## 最短路径
+## The Shortest Path
 
 ```bash
-virtuoso doctor             # 一屏环境体检（✓/✗ 组件行；--verbose 全量）
-virtuoso test --timeout 60  # 构建 → 启动 → 判定 → 工件落盘（收尾打印 verdict 行）
+virtuoso doctor             # one-screen health check (✓/✗ component lines; --verbose for the full picture)
+virtuoso test --timeout 60  # build → boot → judge → artifacts persisted to disk (prints the verdict line at the end)
 ```
 
-从零上手见[快速开始](quick-start.md)。
+To get started from scratch, see [Quick Start](quick-start.md).
 
-## 四阶段
+## The Four Stages
 
-| 阶段 | 命令 | 一句话 |
+| Stage | Command | In one line |
 |---|---|---|
-| 供给 | `virtuoso kernel …` | 容器化内核构建：named volume 源码 + 钉死工具链，产出 Image + `.ko` |
-| 构建 | `virtuoso build` | 组装三个镜像：initrd.img / rootfs.img / tools.img |
-| 启动 | `virtuoso shell` / `test` | QEMU 两段式引导（initramfs → rootfs），进程组全程受治 |
-| 判定 | `virtuoso test` | 串口标记协议 v1 对账 → `verdict.json` 落盘（唯一判定事实） |
+| Provision | `virtuoso kernel …` | Containerized kernel build: sources in a named volume + pinned toolchain, producing Image + `.ko` |
+| Build | `virtuoso build` | Assemble the three images: initrd.img / rootfs.img / tools.img |
+| Launch | `virtuoso shell` / `test` | QEMU two-stage boot (initramfs → rootfs), with the process group governed throughout |
+| Judge | `virtuoso test` | Reconcile against serial marker protocol v1 → `verdict.json` persisted to disk (the single verdict source of truth) |
 
-## 文档地图
+## Documentation Map
 
-| 部分 | 内容 |
+| Section | Contents |
 |---|---|
-| [入门](quick-start.md) | 从零到第一个 `verdict: passed`：装依赖 → 构建内核 → 体检 → 首跑 |
-| [使用](usage/cli.md) | [CLI 参考](usage/cli.md)、[配置](usage/configuration.md)、[编写测试](usage/writing-tests.md)、[调试](usage/debugging.md)、[工件与分诊](usage/artifacts.md)、[AI 集成](usage/ai-integration.md)、[故障排查](usage/troubleshooting.md) |
-| [概念与契约](concepts/design.md) | [设计与理念](concepts/design.md)、[供给与构建流水线](concepts/pipeline.md)、[两段式引导](concepts/boot.md)、[冻结契约](concepts/contracts.md)、[组件机制](concepts/components.md) |
-| [参与](contributing.md) | 贡献约定与 CI 流水线 |
+| [Getting Started](quick-start.md) | From zero to the first `verdict: passed`: install dependencies → build the kernel → health check → first run |
+| [Usage](usage/cli.md) | [CLI Reference](usage/cli.md), [Configuration](usage/configuration.md), [Writing Tests](usage/writing-tests.md), [Debugging](usage/debugging.md), [Artifacts and Triage](usage/artifacts.md), [AI Integration](usage/ai-integration.md), [Troubleshooting](usage/troubleshooting.md) |
+| [Concepts and Contracts](concepts/design.md) | [Design and Philosophy](concepts/design.md), [Provisioning and Build Pipeline](concepts/pipeline.md), [Two-Stage Boot](concepts/boot.md), [Frozen Contracts](concepts/contracts.md), [Components](concepts/components.md) |
+| [Contributing](contributing.md) | Contribution conventions and the CI pipeline |
 
-面向 AI 的仓库地图与不变量在根目录 [AGENTS.md](https://github.com/YXalix/virtuoso/blob/main/AGENTS.md)。
+The AI-oriented repository map and invariants live in the root
+[AGENTS.md](https://github.com/YXalix/virtuoso/blob/main/AGENTS.md).

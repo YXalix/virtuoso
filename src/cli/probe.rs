@@ -1,9 +1,10 @@
-//! probe — AI 交互通道：经 virtio-serial agent（tools/virtuoso-agent）下发
-//! 命令批，结构化事件流回吐。构建 → agent 串口启动 → ping 握手 → 逐条
-//! 下发 → 收割。运行工件：run 目录的 serial.log + agent-events.jsonl。
+//! probe — the AI interaction channel: sends a command batch through the virtio-serial
+//! agent (tools/virtuoso-agent) and streams structured events back. Build → agent
+//! serial launch → ping handshake → send each command → reap. Run artifacts:
+//! serial.log + agent-events.jsonl in the run directory.
 //!
-//! 退出码沿用 crate::judge 契约：0 = 全部命令 exit 0；124 = 看门狗超时；
-//! 其余 = 失败（协议中断/命令非零退出）。
+//! Exit codes follow the crate::judge contract: 0 = all commands exited 0;
+//! 124 = watchdog timeout; anything else = failure (protocol interruption / non-zero command exit).
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -14,7 +15,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde_json::{json, Value};
 
-/// 单次协议读的底层超时（轮询粒度，决定对看门狗 KILL 的响应速度）。
+/// Underlying timeout for a single protocol read (poll granularity; determines how
+/// quickly the watchdog KILL is noticed).
 const IO_TICK: Duration = Duration::from_millis(500);
 
 pub fn run_probe(
@@ -33,9 +35,10 @@ pub fn run_probe(
         None => 300,
     };
 
-    // ---- 构建（probe 恒开 agent 通道：强制把 virtio_console 并入 runtime
-    // 模块清单，不依赖 [components.agent] 开关；agent 随 tools.img 装入
-    // /bin，musl target 缺失时 WARN 跳过，后续握手超时会给出明确指引）----
+    // ---- build (probe always enables the agent channel: forcibly merge virtio_console
+    // into the runtime module list, not depending on the [components.agent] switch; the
+    // agent ships in tools.img into /bin, skipped with a WARN when the musl target is
+    // missing — a later handshake timeout gives clear guidance) ----
     super::build::build_pair_for(&cfg, None, &["virtio_console".to_string()])?;
 
     let commands = collect_commands(cmds, cmd_file)?;
@@ -47,9 +50,10 @@ pub fn run_probe(
     let run = crate::runs::create_run_dir(&cfg.project_root, arch.name())?;
     println!("[RUN] artifacts: {}", run.path.display());
 
-    // ---- 启动（agent 串口恒开：probe 绕过组件开关，socket 直接指定）----
+    // ---- launch (agent serial always on: probe bypasses the component switch,
+    // socket given directly) ----
     let sock_path = run.path.join("agent.sock");
-    let _ = std::fs::remove_file(&sock_path); // QEMU 不清理已存在的 socket 路径
+    let _ = std::fs::remove_file(&sock_path); // QEMU does not clean up an existing socket path
     let inv = super::build_invocation(&super::LaunchPlan {
         cfg: &cfg,
         arch,
@@ -62,8 +66,9 @@ pub fn run_probe(
     println!("[LAUNCH] {}", inv.command_line()?);
     let (mut child, mut sup) = inv.spawn_supervised(true)?;
 
-    // 串口泵放工作线程（阻塞读），主线程跑 agent 协议；总超时到点看门狗
-    // KILL 进程组 → 串口与 socket 双双 EOF，两条线程自然汇合。
+    // The serial pump runs on a worker thread (blocking reads); the main thread runs
+    // the agent protocol. When the total timeout hits, the watchdog KILLs the process
+    // group → serial and socket both EOF, and the two threads join naturally.
     let timed_out = Arc::new(AtomicBool::new(false));
     let watchdog =
         crate::launcher::spawn_watchdog(sup.pgid(), timeout_secs, Arc::clone(&timed_out));
@@ -78,8 +83,9 @@ pub fn run_probe(
     let deadline = started + Duration::from_secs(timeout_secs);
     let outcome = session(&sock_path, &commands, json, &run.path, deadline);
 
-    // 无论成败：收 VM、汇合线程、结清看门狗（先取快照再置退出标志，
-    // 看门狗轮询该标志退出 —— 顺序与 test_once 一致，避免误标超时）
+    // Regardless of outcome: tear down the VM, join the threads, settle the watchdog
+    // (take the snapshot before setting the exit flag, which the watchdog polls to
+    // exit — same order as test_once, avoiding a spurious timeout flag)
     let timed_out_now = timed_out.load(Ordering::SeqCst);
     sup.kill_now();
     timed_out.store(true, Ordering::SeqCst);
@@ -101,7 +107,8 @@ pub fn run_probe(
         _ if timed_out_now => crate::judge::EXIT_TIMEOUT,
         _ => 1,
     };
-    // 与 test 同一分离呈现：失败时补看 QEMU stderr 尾部，成功保持安静。
+    // Same separated presentation as test: on failure show the QEMU stderr tail, on
+    // success stay quiet.
     if let Ok(pumped) = &pumped {
         pumped.report_tail_on_failure(exit_code);
     }
@@ -119,7 +126,8 @@ pub fn run_probe(
     Ok(exit_code)
 }
 
-/// 协议会话：连接 → hello/ping 握手 → 逐条命令。返回 Ok(true) = 全部通过。
+/// Protocol session: connect → hello/ping handshake → commands one by one.
+/// Ok(true) = all passed.
 fn session(
     sock_path: &Path,
     commands: &[String],
@@ -142,7 +150,8 @@ fn session(
     if !hello.contains("\"hello\"") {
         anyhow::bail!("unexpected first line from agent: {hello}");
     }
-    // ping 握手：确认协议往返可用（modules.conf 加载完成、agent 就绪）
+    // ping handshake: confirm the protocol round trip works (modules.conf fully
+    // loaded, agent ready)
     let pong = exchange(&mut wire, &mut events, json, 0, "ping", |v| {
         v.get("type").and_then(Value::as_str) == Some("pong")
     })?;
@@ -185,16 +194,17 @@ fn session(
 }
 
 struct Reply {
-    /// 收到的全部事件行（JSON 字符串）
+    /// All received event lines (JSON strings)
     lines: Vec<String>,
-    /// exit 事件的 code（未收到 = None）
+    /// The exit event's code (None = not received)
     exit_code: Option<i64>,
-    /// 是否出现 error 事件
+    /// Whether an error event appeared
     had_error: bool,
 }
 
-/// 发送一条请求并按谓词收集事件（命令等 exit；ping 等 pong —— ping 没有
-/// exit 事件，不能与命令共用「等 exit」的终止条件）。
+/// Send one request and collect events until a predicate fires (commands await exit;
+/// ping awaits pong — ping has no exit event, so it cannot share the commands'
+/// "await exit" termination condition).
 fn exchange(
     wire: &mut LineSock,
     events: &mut std::fs::File,
@@ -235,7 +245,8 @@ fn exchange(
     }
 }
 
-/// 事件落盘 + 终端呈现（json 模式原样透传，human 模式摘要行）。
+/// Persist events to disk + terminal rendering (json mode passes through verbatim;
+/// human mode prints summary lines).
 fn log_event(events: &mut std::fs::File, line: &str, json: bool) -> std::io::Result<()> {
     events.write_all(line.as_bytes())?;
     events.write_all(b"\n")?;
@@ -248,8 +259,9 @@ fn log_event(events: &mut std::fs::File, line: &str, json: bool) -> std::io::Res
         println!("raw: {line}");
         return Ok(());
     };
-    // human 模式降噪：out/err 流与心跳只落 agent-events.jsonl，终端只报
-    // 值得行动的事件（error）；exit 由 session 统一汇报
+    // human mode noise reduction: out/err streams and heartbeats only land in
+    // agent-events.jsonl; the terminal only reports actionable events (error);
+    // exit is reported uniformly by session
     let id = ev.get("id").and_then(Value::as_u64);
     if ev.get("type").and_then(Value::as_str) == Some("error") {
         println!(
@@ -266,9 +278,9 @@ fn tag(id: Option<u64>) -> String {
         .unwrap_or_else(|| "[agent] ".into())
 }
 
-/// 连接 agent socket：QEMU 立即监听，guest agent 要等引导完成才会说话，
-/// 但 chardev 连接本身在启动后即成功 —— 连接成功 ≠ agent 就绪，就绪由
-/// hello 行确认。
+/// Connect to the agent socket: QEMU listens immediately; the guest agent only speaks
+/// after boot completes, but the chardev connection itself succeeds right after
+/// startup — connected ≠ agent ready; readiness is confirmed by the hello line.
 fn connect(sock_path: &Path, deadline: Instant) -> std::io::Result<UnixStream> {
     loop {
         match UnixStream::connect(sock_path) {
@@ -302,8 +314,9 @@ fn collect_commands(cmds: &[String], cmd_file: Option<&Path>) -> anyhow::Result<
     Ok(all)
 }
 
-/// unix socket 行读取器：自管缓冲 + 轮询超时（BufReader 在 TimedOut 时可能
-/// 吞掉已缓冲的部分行，这里逐字节搬移避免丢失）。
+/// Unix socket line reader: self-managed buffer + polled timeout (BufReader can
+/// swallow a buffered partial line on TimedOut; here bytes are moved one by one
+/// to avoid loss).
 struct LineSock {
     sock: UnixStream,
     buf: Vec<u8>,
@@ -327,7 +340,8 @@ impl LineSock {
         self.sock.write_all(&bytes)
     }
 
-    /// 读一行（不含 \n）。deadline 内无完整行返回 Err；EOF 且无残留返回 Ok(None)。
+    /// Read one line (without the trailing \n). Returns Err if no complete line arrives
+    /// within the deadline; Ok(None) on EOF with no residue.
     fn next_line(&mut self, deadline: Instant) -> anyhow::Result<Option<String>> {
         let mut line = Vec::new();
         loop {

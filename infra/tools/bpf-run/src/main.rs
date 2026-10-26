@@ -1,21 +1,30 @@
-//! bpf-run — VM 常驻 eBPF runner（tools.img /bin，默认随盘）：程序态观测入口。
+//! bpf-run — resident in-VM eBPF runner (tools.img /bin, on the disk by
+//! default): the programmatic observability entry point.
 //!
-//! 与 bpftrace（脚本态、临时探索）分工：bpf-run 消费**宿主编译好的现成
-//! .bpf.o**（rootfs.d drop-in 随 rootfs 分发、或测例内嵌），加载、按段
-//! 挂接、把 ringbuf 事件解码成 JSONL 到 stdout——结构化事件流经 probe
-//! 通道回宿主，落 agent-events.jsonl，即 AI-native 观测闭环。
+//! Division of labor vs bpftrace (script mode, ad-hoc exploration): bpf-run
+//! consumes **ready-made .bpf.o objects built on the host** (distributed
+//! with the rootfs via rootfs.d drop-ins, or embedded in test cases), loads
+//! them, attaches per section, and decodes ringbuf events to JSONL on
+//! stdout — the structured event stream returns to the host over the probe
+//! channel and lands in agent-events.jsonl: the AI-native observability
+//! loop.
 //!
-//! 支持段：kprobe/<sym>、kretprobe/<sym>、tracepoint/<cat>/<name>、
-//! raw_tracepoint/<name>（其余段 warn 跳过）。事件解码契约：--struct NAME
-//! 指向对象 .BTF 里的同名 struct/union（含 typedef 别名），记录长度匹配
-//! 即按字段解码，否则 hex 兜底（aya 拒绝 ringbuf 的 values 注解成员，
-//! 对象内声明解码类型不可行，显式 --struct 是唯一通道，见 src/btf.rs）。
+//! Supported sections: kprobe/<sym>, kretprobe/<sym>,
+//! tracepoint/<cat>/<name>, raw_tracepoint/<name> (other sections are
+//! skipped with a warning). Event decoding contract: --struct NAME points
+//! at a same-named struct/union (including typedef aliases) in the object's
+//! .BTF; records of matching length decode field-by-field, otherwise hex
+//! fallback (aya rejects the values-annotated members of ringbufs, so
+//! declaring decode types inside the object is not possible and an explicit
+//! --struct is the only channel; see src/btf.rs).
 //!
-//! stdout 恒为纯事件 JSONL（每行 flush）；进度/诊断走 stderr；退出码：
-//! 0 正常（含零事件）、1 加载/挂接失败（错误链含 verifier 日志）、2 用法错。
+//! stdout is always pure event JSONL (flushed per line); progress and
+//! diagnostics go to stderr; exit codes: 0 normal (including zero events),
+//! 1 load/attach failure (error chain includes the verifier log), 2 usage
+//! error.
 //!
-//! 宿主 check 兼容：aya 是 Linux-only 依赖，经
-//! `[target.'cfg(target_os = "linux")']` 注入；非 Linux 宿主编裸桩。
+//! Host check compatibility: aya is a Linux-only dependency, injected via
+//! `[target.'cfg(target_os = "linux")']`; non-Linux hosts build a bare stub.
 
 
 fn main() {
@@ -137,7 +146,7 @@ mod imp {
         let (obj_path, structs, programs, wait) = parse_args(args)?;
         let bytes = std::fs::read(&obj_path).context("read object")?;
 
-        // ELF 元数据：程序段（符号 = aya 的 program 名）+ .BTF
+        // ELF metadata: program sections (symbols = aya program names) + .BTF
         let elf = object::File::parse(&bytes[..]).context("parse ELF")?;
         let mut sections: Vec<(usize, Attach)> = Vec::new();
         for sec in elf.sections() {
@@ -175,9 +184,12 @@ mod imp {
             None => None,
         };
 
-        // 加载 + 挂接。单程序失败 warn-and-continue（对象可含多程序，
-        // 一处不可挂不吞其余观测面）；全部失败才整体报错。
-        // load 失败的错误链带 verifier 日志——内核 BPF 开发反馈面。
+        // Load + attach. A single program failure warn-and-continues (an
+        // object may hold several programs; one unattachable point must not
+        // swallow the rest of the observability surface); only everything
+        // failing is a total error.
+        // A load failure's error chain carries the verifier log — the kernel
+        // BPF development feedback surface.
         let mut bpf = aya::Ebpf::load(&bytes).map_err(|e| anyhow!("load: {e:#}"))?;
         let mut attached = 0usize;
         let mut failed = 0usize;
@@ -223,9 +235,11 @@ mod imp {
             bail!("no programs attached ({failed} failed)");
         }
 
-        // ringbuf 发现（BTF .maps datasec）+ 解码类型（--struct，按记录长度匹配）
-        // 解码候选：--struct 显式指定；缺省自动模式 = 全部具名 struct
-        // （记录长度命中即按字段解码，多候选同长取 BTF 序首个）。
+        // ringbuf discovery (BTF .maps datasec) + decode types (--struct,
+        // matched by record length). Decode candidates: explicit --struct;
+        // default auto mode = all named structs (a record length hit decodes
+        // field-by-field; equal-length candidates take the first in BTF
+        // order).
         let mut decoders: Vec<(u32, usize)> = Vec::new();
         if !structs.is_empty() && btf.is_none() {
             bail!("--struct needs a .BTF section in the object");
@@ -259,7 +273,8 @@ mod imp {
             eprintln!("bpf-run: no ringbuf maps; events (bpf_printk) go to trace_pipe");
         }
 
-        // 事件循环：轮询全部 ringbuf，记录长度匹配 --struct 即字段解码
+        // Event loop: poll every ringbuf; records whose length matches a
+        // --struct decode field-by-field
         let mut events: u64 = 0;
         let deadline = Instant::now() + Duration::from_secs_f64(wait);
         loop {

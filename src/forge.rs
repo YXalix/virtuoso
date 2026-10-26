@@ -1,19 +1,22 @@
-//! forge — 内核锻造：容器化内核源码供给（named volume + 钉死工具链镜像）。
+//! forge — kernel forging: containerized kernel source provisioning (named volume +
+//! pinned toolchain image).
 //!
-//! 收编 `devkit/docker/kernel.sh`（薄壳退役，CI 发布的 Dockerfile.kernel
-//! 保留在原位）：源码权威存 named volume（容器侧 ext4：大小写敏感 + 构建
-//! 性能），宿主经平台视图直接读写——macOS = OrbStack 视图、Linux = volume
-//! 本体。`virtuoso kernel` 命令组投影到本模块：clone/defconfig/build/
-//! shell + list/use（卷管理与 current 切换，活动卷状态落 repo 根
-//! `.virtuoso/kernel-current.json`）。源码编辑走 VS Code devcontainer
-//! （容器内 clangd 吃 build 产出的 /ksrc 原始形态 compile_commands.json）。
+//! Absorbs `devkit/docker/kernel.sh` (the thin shell is retired; the CI-published
+//! Dockerfile.kernel stays in place): the source of truth lives in a named volume
+//! (container-side ext4: case-sensitive + build performance), read and written directly
+//! by the host through a platform view — macOS = OrbStack view, Linux = the volume
+//! itself. The `virtuoso kernel` command group projects onto this module:
+//! clone/defconfig/build/shell + list/use (volume management and current switching;
+//! active volume state lands in repo-root `.virtuoso/kernel-current.json`). Source
+//! editing goes through the VS Code devcontainer (in-container clangd consumes the
+//! /ksrc raw-form compile_commands.json produced by build).
 //!
-//! 测试主循环在宿主原生跑，内核树自动跟随活动卷（config 解析序：
-//! env KERNEL_PATH > current 活动卷 > toml kernel_path），`virtuoso
-//! doctor / build / test` 无需手动指路径。
+//! The test main loop runs natively on the host and follows the active volume
+//! automatically (config resolution order: env KERNEL_PATH > current active volume >
+//! toml kernel_path), so `virtuoso doctor / build / test` need no manual path.
 //!
-//! 分节：活动卷状态（current）→ volume 宿主视图与引擎守卫 → 工具链镜像
-//! 容器调用 → clone 流水线 → devcontainer 渲染。
+//! Sections: active volume state (current) → volume host view and engine guard →
+//! toolchain image container calls → clone pipeline → devcontainer rendering.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,35 +30,38 @@ use crate::util::Progress;
 
 use crate::Arch;
 
-/// 缺省卷名（每卷自含源码 + .config + 增量产物，切回免重编）。
+/// Default volume name (each volume carries its own source + .config + incremental
+/// artifacts, so switching back needs no rebuild).
 pub(crate) const DEFAULT_VOLUME: &str = "virtuoso-kernel";
-/// 钉死工具链镜像（kernel-builder.yml 发布 ghcr；pull 失败回落本地构建
-/// devkit/docker/Dockerfile.kernel）。
+/// Pinned toolchain image (published to ghcr by kernel-builder.yml; on pull failure
+/// falls back to a local build of devkit/docker/Dockerfile.kernel).
 pub(crate) const DEFAULT_IMAGE: &str = "ghcr.io/yxalix/virtuoso-kernel:latest";
-/// clone 缺省 ref。
+/// Default clone ref.
 pub(crate) const DEFAULT_REF: &str = "master";
 
-// ---------------------------------------------------------------- 活动卷状态（current）
+// ---------------------------------------------------------------- active volume state (current)
 
-// current 不进 `virtuoso.toml`（唯一配置面留给持久启动配置），用专门的
-// 文件表示"当前是哪个卷"——机器本地会话状态，git 忽略；`kernel use/clone`
-// 写入，`path/list` 与 doctor 读它。写 current 的唯一入口 [`write_current`]
-// 同步渲染 `.devcontainer/devcontainer.json`（devcontainer 跟随活动卷）。
-// 状态文件：`.virtuoso/kernel-current.json`。
+// current stays out of `virtuoso.toml` (the single config surface is reserved for
+// persistent launch configuration); a dedicated file records "which volume is current" —
+// machine-local session state, git-ignored; written by `kernel use/clone`, read by
+// `path/list` and doctor. The sole entry point writing current, [`write_current`], also
+// renders `.devcontainer/devcontainer.json` in sync (the devcontainer follows the active
+// volume). State file: `.virtuoso/kernel-current.json`.
 
-/// 当前活动卷（volume + 目标架构）。
+/// Current active volume (volume + target architecture).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Current {
     pub volume: String,
     pub arch: String,
 }
 
-/// 状态文件路径（repo 根 `.virtuoso/kernel-current.json`）。
+/// State file path (repo-root `.virtuoso/kernel-current.json`).
 pub(crate) fn state_path(project_root: &Path) -> PathBuf {
     project_root.join(".virtuoso").join("kernel-current.json")
 }
 
-/// 缺失 = 无活动卷（raw/preset 模式，doctor 零打扰）；存在但非法 = 报错。
+/// Missing = no active volume (raw/preset mode; doctor stays silent); present but
+/// invalid = error.
 pub(crate) fn read_current(project_root: &Path) -> anyhow::Result<Option<Current>> {
     let p = state_path(project_root);
     if !p.is_file() {
@@ -65,32 +71,35 @@ pub(crate) fn read_current(project_root: &Path) -> anyhow::Result<Option<Current
         std::fs::read_to_string(&p).with_context(|| format!("read {} failed", p.display()))?;
     serde_json::from_str(&text).map(Some).with_context(|| {
         format!(
-            "{} 损坏（期望 {{volume, arch}}）；重新执行 `virtuoso kernel use <volume>` 修复",
+            "{} corrupted (expected {{volume, arch}}); repair with `virtuoso kernel use <volume>`",
             p.display()
         )
     })
 }
 
-/// 写入（目录不存在则创建；父目录 `.virtuoso/` 已 git 忽略）。
-/// 同步渲染 `.devcontainer/devcontainer.json`——current 变更必须跟随，
-/// 放唯一写入口免得未来新增 writer 漏挂。
+/// Writes the file (creates the directory if missing; the parent `.virtuoso/` is already
+/// git-ignored). Also renders `.devcontainer/devcontainer.json` in sync — every change
+/// to current must be followed there; keeping it in the sole write entry point prevents
+/// future writers from missing the hook.
 pub(crate) fn write_current(project_root: &Path, current: &Current) -> anyhow::Result<()> {
     let p = state_path(project_root);
-    std::fs::create_dir_all(p.parent().expect("状态文件必有父目录"))?;
+    std::fs::create_dir_all(p.parent().expect("state file must have a parent directory"))?;
     std::fs::write(&p, format!("{}\n", serde_json::to_string_pretty(current)?))?;
     render(project_root, current)?;
     Ok(())
 }
 
-// ---------------------------------------------------------------- volume 宿主视图与引擎守卫
+// ---------------------------------------------------------------- volume host view and engine guard
 
-// 源码权威存 named volume，宿主经平台视图直接读写：macOS 走 OrbStack 视图
-// （Docker Desktop 的 volume 在 VM 虚拟盘里，宿主不可见）；Linux 上 volume
-// 本体就在宿主文件系统，取引擎权威 Mountpoint（rootless 落 $HOME 下，免
-// root）。两个平台该路径都是纯宿主路径——测试主循环的 kernel_path（QEMU
-// 消费内核镜像）指向它；源码编辑走容器内 devcontainer，不经宿主视图。
+// The source of truth lives in a named volume; the host reads and writes it directly
+// through a platform view: macOS goes through the OrbStack view (Docker Desktop volumes
+// live on the VM's virtual disk, invisible to the host); on Linux the volume itself sits
+// on the host filesystem, so the engine's authoritative Mountpoint is used (rootless
+// lands under $HOME, no root needed). On both platforms the path is a pure host path —
+// the test main loop's kernel_path (QEMU consumes the kernel image from it) points
+// there; source editing goes through the in-container devcontainer, never the host view.
 
-/// OrbStack 对 named volume 的宿主视图（OrbStack 运行时存在）。
+/// OrbStack's host view of a named volume (exists when OrbStack is the runtime).
 pub(crate) fn orbstack_view(home: &Path, volume: &str) -> PathBuf {
     home.join("OrbStack")
         .join("docker")
@@ -98,7 +107,7 @@ pub(crate) fn orbstack_view(home: &Path, volume: &str) -> PathBuf {
         .join(volume)
 }
 
-/// volume 的宿主可见路径。
+/// Host-visible path of a volume.
 pub(crate) fn host_view(volume: &str) -> anyhow::Result<PathBuf> {
     match std::env::consts::OS {
         "macos" => {
@@ -114,20 +123,23 @@ pub(crate) fn host_view(volume: &str) -> anyhow::Result<PathBuf> {
                 .context("failed to run docker volume inspect (is docker present?)")?;
             anyhow::ensure!(
                 out.status.success(),
-                "volume {volume} 不存在（先 `virtuoso kernel clone <git-url>`）：{}",
+                "volume {volume} does not exist (run `virtuoso kernel clone <git-url>` first): {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
             let mp = String::from_utf8_lossy(&out.stdout).trim().to_string();
             anyhow::ensure!(!mp.is_empty(), "volume {volume} has an empty Mountpoint");
             Ok(PathBuf::from(mp))
         }
-        os => anyhow::bail!("不支持的宿主平台 {os}（docker 内核供给支持 macOS/Linux）"),
+        os => anyhow::bail!(
+            "unsupported host platform {os} (docker kernel provisioning supports macOS/Linux)"
+        ),
     }
 }
 
-/// macOS 引擎守卫：volume 的宿主视图由 OrbStack 提供，docker 端点必须指向
-/// OrbStack 引擎，否则 clone/build 会把卷建进别的引擎 VM，视图永远看不到。
-/// 非 macOS 恒通过（Linux 的 volume 本体即宿主目录，无视图引擎问题）。
+/// macOS engine guard: the host view of a volume is provided by OrbStack, so the docker
+/// endpoint must point at the OrbStack engine; otherwise clone/build create the volume in
+/// another engine's VM where the view can never see it. Always passes on non-macOS (on
+/// Linux the volume itself is a host directory; no view-engine mismatch).
 pub(crate) fn engine_guard() -> anyhow::Result<()> {
     if std::env::consts::OS != "macos" {
         return Ok(());
@@ -140,18 +152,18 @@ pub(crate) fn engine_guard() -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "macOS 上当前 docker 引擎不是 OrbStack（endpoint: {ep}）。\n  执行 'docker context use orbstack'，或对单条命令 export DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock。"
+        "the current docker engine on macOS is not OrbStack (endpoint: {ep}).\n  Run 'docker context use orbstack', or for a single command export DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock"
     )
 }
 
-/// 引擎端点是否指向 OrbStack（unix socket 是 `$HOME/.orbstack/...`；远程
-/// context 主机名通常也含 orbstack 字样，宽松匹配宁可放行——误拦的代价是
-/// 用户被守卫挡住）。
+/// Whether the engine endpoint points at OrbStack (unix sockets are `$HOME/.orbstack/...`;
+/// remote context hostnames usually contain "orbstack" too — lenient matching prefers
+/// letting traffic through, since a false block costs the user a stuck guard).
 fn endpoint_is_orbstack(endpoint: &str) -> bool {
     endpoint.contains("orbstack")
 }
 
-/// 当前 docker context 的引擎端点（DOCKER_HOST 未设置时的权威来源）。
+/// Engine endpoint of the current docker context (authoritative when DOCKER_HOST is unset).
 fn docker_context_endpoint() -> anyhow::Result<String> {
     let out = Command::new("docker")
         .args(["context", "show"])
@@ -161,7 +173,7 @@ fn docker_context_endpoint() -> anyhow::Result<String> {
         })?;
     anyhow::ensure!(
         out.status.success(),
-        "docker context show 失败：{}",
+        "docker context show failed: {}",
         String::from_utf8_lossy(&out.stderr).trim()
     );
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -181,13 +193,14 @@ fn docker_context_endpoint() -> anyhow::Result<String> {
         .context("failed to run docker context inspect")?;
     anyhow::ensure!(
         out.status.success(),
-        "docker context inspect {name} 失败：{}",
+        "docker context inspect {name} failed: {}",
         String::from_utf8_lossy(&out.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// 引擎里的全部卷名（`docker volume ls`，引擎即权威注册表，不另建清单）。
+/// All volume names in the engine (`docker volume ls`; the engine is the authoritative
+/// registry, no separate manifest is kept).
 pub(crate) fn list() -> anyhow::Result<Vec<String>> {
     let out = Command::new("docker")
         .args(["volume", "ls", "--format", "{{ .Name }}"])
@@ -195,7 +208,7 @@ pub(crate) fn list() -> anyhow::Result<Vec<String>> {
         .context("failed to run docker volume ls (is docker present?)")?;
     anyhow::ensure!(
         out.status.success(),
-        "docker volume ls 失败：{}",
+        "docker volume ls failed: {}",
         String::from_utf8_lossy(&out.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&out.stdout)
@@ -206,7 +219,7 @@ pub(crate) fn list() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-/// volume 是否存在（引擎权威）。
+/// Whether a volume exists (engine-authoritative).
 pub(crate) fn exists(volume: &str) -> bool {
     Command::new("docker")
         .args(["volume", "inspect", volume])
@@ -215,14 +228,14 @@ pub(crate) fn exists(volume: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 卷内容状态（fs-only 探测宿主视图，不起容器）。
+/// Volume content state (fs-only probe of the host view; no container is started).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
-    /// 空 / 不可达
+    /// Empty / unreachable
     Empty,
-    /// 有源码树（Makefile），未配置（无 .config）
+    /// Source tree present (Makefile), not configured (no .config)
     Cloned,
-    /// Makefile + .config 齐备，可构建
+    /// Makefile + .config present, ready to build
     Configured,
 }
 
@@ -236,7 +249,8 @@ impl Status {
     }
 }
 
-/// 按宿主视图探测卷内容：Makefile+.config = configured，仅 Makefile = cloned。
+/// Probes volume contents via the host view: Makefile+.config = configured,
+/// Makefile only = cloned.
 pub(crate) fn status(view: &Path) -> Status {
     match (
         view.join("Makefile").is_file(),
@@ -248,17 +262,19 @@ pub(crate) fn status(view: &Path) -> Status {
     }
 }
 
-// ---------------------------------------------------------------- 工具链镜像容器调用
+// ---------------------------------------------------------------- toolchain image container calls
 
-// 镜像供给（pull 回落本地构建 Dockerfile.kernel）、通用 docker run 封装、
-// 架构 → make 环境 / clangd triple / make 镜像目标映射（照 kernel.sh 原值）。
+// Image provisioning (pull, falling back to a local Dockerfile.kernel build), a generic
+// docker run wrapper, and the arch → make env / clangd triple / make image target
+// mappings (verbatim from kernel.sh).
 
-/// 工具链镜像覆盖 env。注意不能叫 `KERNEL_IMAGE`——那个名字已被 CLI 配置面
-/// 占用（启动内核镜像覆盖，config.rs）。
+/// Toolchain image override env. Must not be named `KERNEL_IMAGE` — that name is already
+/// taken by the CLI config surface (launch kernel image override, config.rs).
 pub(crate) const IMAGE_ENV: &str = "KERNEL_TOOLCHAIN_IMAGE";
 
-/// 工具链镜像解析：env `KERNEL_TOOLCHAIN_IMAGE` > ghcr 发布镜像。devcontainer
-/// 渲染与此同源（保证编辑容器与构建容器同镜像）。
+/// Toolchain image resolution: env `KERNEL_TOOLCHAIN_IMAGE` > ghcr-published image.
+/// The devcontainer rendering shares this source (keeping edit and build containers
+/// on the same image).
 pub(crate) fn resolve_image() -> String {
     std::env::var(IMAGE_ENV)
         .ok()
@@ -266,7 +282,7 @@ pub(crate) fn resolve_image() -> String {
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string())
 }
 
-/// 工具链镜像是否在位（引擎权威）。
+/// Whether the toolchain image is present (engine-authoritative).
 pub(crate) fn image_present(image: &str) -> bool {
     Command::new("docker")
         .args(["image", "inspect", image])
@@ -275,8 +291,9 @@ pub(crate) fn image_present(image: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 镜像供给：在位即短路；pull 失败回落本地构建 devkit/docker/Dockerfile.kernel
-/// （与 kernel-builder.yml 发布 ghcr 的钉死工具链同源）。
+/// Image provisioning: short-circuits when present; a pull failure falls back to building
+/// devkit/docker/Dockerfile.kernel locally (same pinned toolchain as the ghcr publication
+/// in kernel-builder.yml).
 pub(crate) fn ensure_image(
     image: &str,
     dockerfile_dir: &Path,
@@ -317,7 +334,7 @@ pub(crate) fn ensure_image(
     Ok(())
 }
 
-/// 通用容器调用基座：volume 挂 /ksrc（workspace），工作目录 /ksrc。
+/// Generic container call base: volume mounted at /ksrc (workspace), workdir /ksrc.
 fn base_cmd(volume: &str, image: &str, tty: bool) -> Command {
     let mut cmd = Command::new("docker");
     cmd.args(["run", "--rm", "-i"]);
@@ -331,7 +348,8 @@ fn base_cmd(volume: &str, image: &str, tty: bool) -> Command {
     cmd
 }
 
-/// 流式执行容器内脚本（stdio 继承，内核构建的长输出实时可见）。
+/// Runs an in-container script with streaming output (stdio inherited, so long kernel
+/// build output stays visible in real time).
 pub(crate) fn run_streaming(
     volume: &str,
     image: &str,
@@ -348,13 +366,13 @@ pub(crate) fn run_streaming(
         .with_context(|| format!("failed to run docker (is the engine up? volume {volume})"))?;
     anyhow::ensure!(
         st.success(),
-        "容器内命令失败（exit {}）：{script}",
+        "in-container command failed (exit {}): {script}",
         st.code().unwrap_or(-1)
     );
     Ok(())
 }
 
-/// 交互式容器命令（shell：TTY + stdio 继承），返回退出码。
+/// Interactive container command (shell: TTY + stdio inherited); returns the exit code.
 pub(crate) fn run_tty(
     volume: &str,
     image: &str,
@@ -372,7 +390,8 @@ pub(crate) fn run_tty(
     Ok(st.code().unwrap_or(130))
 }
 
-/// 经 stdin 向容器内写文件（平台无关，不依赖宿主视图在位）。
+/// Writes a file into the container via stdin (platform-independent; does not rely on
+/// the host view being present).
 pub(crate) fn write_file(volume: &str, image: &str, dest: &str, content: &str) -> anyhow::Result<()> {
     let mut child = base_cmd(volume, image, false)
         .arg("sh")
@@ -384,7 +403,7 @@ pub(crate) fn write_file(volume: &str, image: &str, dest: &str, content: &str) -
     child
         .stdin
         .as_mut()
-        .expect("stdin 已声明 piped")
+        .expect("stdin is declared piped")
         .write_all(content.as_bytes())
         .with_context(|| format!("write inside container to {dest} failed"))?;
     let st = child.wait()?;
@@ -396,8 +415,9 @@ pub(crate) fn write_file(volume: &str, image: &str, dest: &str, content: &str) -
     Ok(())
 }
 
-/// arch → 容器内 make 环境（arm64 在 arm64 容器 = 原生前端，其余交叉；
-/// 照 kernel.sh 原值——容器基座是 arm64，x86_64/riscv64 无条件交叉）。
+/// arch → in-container make env (arm64 on an arm64 container = native front end, the
+/// rest cross-compiled; verbatim from kernel.sh — the container base is arm64, so
+/// x86_64/riscv64 always cross-compile).
 pub(crate) fn make_env(arch: Arch) -> Vec<(&'static str, &'static str)> {
     match arch {
         Arch::Arm64 => vec![("ARCH", "arm64")],
@@ -406,7 +426,7 @@ pub(crate) fn make_env(arch: Arch) -> Vec<(&'static str, &'static str)> {
     }
 }
 
-/// arch → clangd --target triple（.clangd 的 --target 行替换值）。
+/// arch → clangd --target triple (replacement for the --target line in .clangd).
 pub(crate) fn clangd_target(arch: Arch) -> &'static str {
     match arch {
         Arch::Arm64 => "aarch64-linux-gnu",
@@ -415,7 +435,7 @@ pub(crate) fn clangd_target(arch: Arch) -> &'static str {
     }
 }
 
-/// arch → make 的内核镜像目标（x86_64 无 Image 目标，只有 bzImage）。
+/// arch → kernel image target for make (x86_64 has no Image target, only bzImage).
 pub(crate) fn make_image_target(arch: Arch) -> &'static str {
     match arch {
         Arch::Arm64 | Arch::Riscv64 => "Image",
@@ -423,7 +443,7 @@ pub(crate) fn make_image_target(arch: Arch) -> &'static str {
     }
 }
 
-/// arch → 容器内 `uname -m` 的同构形态（供给链脚本的守卫用）。
+/// arch → container-native form of `uname -m` (used by provisioning-script guards).
 fn uname_arch(arch: Arch) -> &'static str {
     match arch {
         Arch::Arm64 => "aarch64",
@@ -432,13 +452,15 @@ fn uname_arch(arch: Arch) -> &'static str {
     }
 }
 
-/// kernel build 附加步：内核树内静态 bpftool（in-tree libbpf 同树链入，
-/// 版本与被测内核严格匹配——`btf dump`/`prog`/`map` 检视的控制面）。
-/// libelf.a 的 elf_compress 引 zstd，静态链接须显式 `-lzstd`；主线 6.12+
-/// 的 bpftool sign.c 引 libcrypto（EVP/PEM），须显式 `-lcrypto`（openEuler
-/// 6.6 树没有 sign.c，多链一个 .a 无害）。仅容器原生 arch 与目标同构时可行
-/// （静态 libelf/z/zstd/crypto 只按容器原生 arch 装包，交叉缺静态库）；失败不
-/// 致命——kernel make 的退出码不受影响，只 WARN 提示。
+/// kernel build extra step: static bpftool inside the kernel tree (in-tree libbpf linked
+/// from the same tree, strictly matching the kernel under test — the control plane for
+/// `btf dump`/`prog`/`map` inspection). libelf.a's elf_compress pulls in zstd, so static
+/// linking needs explicit `-lzstd`; mainline 6.12+ bpftool sign.c pulls in libcrypto
+/// (EVP/PEM), needing explicit `-lcrypto` (the openEuler 6.6 tree lacks sign.c; one extra
+/// .a is harmless). Only feasible when the container's native arch matches the target
+/// (static libelf/z/zstd/crypto packages are installed only for the container-native arch;
+/// cross builds lack the static libs). Failure is not fatal — the kernel make exit code is
+/// unaffected, only a WARN hint is printed.
 pub(crate) fn bpftool_step(jobs: usize, arch: Arch) -> String {
     let uname = uname_arch(arch);
     format!(
@@ -457,10 +479,11 @@ fi
     )
 }
 
-/// compile_commands.json 生成（/ksrc 原始形态，容器内 clangd/devcontainer
-/// 消费）。脚本由内核树自带（从 .cmd 文件聚合，无需 bear）：mainline/
-/// openEuler 均为 `scripts/clang-tools/gen_compile_commands.py`；个别树可能
-/// 放在 `scripts/compile_commands.py`，作回落。
+/// compile_commands.json generation (raw form under /ksrc, consumed by in-container
+/// clangd/devcontainer). The script ships with the kernel tree (aggregated from .cmd
+/// files, no bear needed): mainline/openEuler both use
+/// `scripts/clang-tools/gen_compile_commands.py`; some trees may place it at
+/// `scripts/compile_commands.py`, used as a fallback.
 pub(crate) fn cdb_generate(volume: &str, image: &str) -> anyhow::Result<()> {
     let script = "if [ -f scripts/clang-tools/gen_compile_commands.py ]; then \
                       python3 scripts/clang-tools/gen_compile_commands.py; \
@@ -470,12 +493,12 @@ pub(crate) fn cdb_generate(volume: &str, image: &str) -> anyhow::Result<()> {
     run_streaming(volume, image, &[], script)
 }
 
-// ---------------------------------------------------------------- clone 流水线
+// ---------------------------------------------------------------- clone pipeline
 
-// clone 流水线：建卷 → git clone 进卷 → 渲染 .clangd → 写 current。
+// clone pipeline: create volume → git clone into the volume → render .clangd → write current.
 
-/// .clangd 模板源（devkit/docker/.clangd，唯一事实来源；--target 行由
-/// render_clangd 按目标架构替换）。
+/// .clangd template source (devkit/docker/.clangd, the single source of truth; the
+/// --target line is replaced by render_clangd per target architecture).
 pub(crate) fn clangd_template(project_root: &Path) -> anyhow::Result<String> {
     let path = project_root.join("devkit").join("docker").join(".clangd");
     std::fs::read_to_string(&path).with_context(|| {
@@ -486,7 +509,7 @@ pub(crate) fn clangd_template(project_root: &Path) -> anyhow::Result<String> {
     })
 }
 
-/// --target=<triple> 行替换（退役 kernel.sh 的 sed：`s/--target=[a-z0-9_-]*/…/`）。
+/// --target=<triple> line replacement (retires kernel.sh's sed: `s/--target=[a-z0-9_-]*/…/`).
 pub(crate) fn render_clangd(template: &str, target: &str) -> String {
     const NEEDLE: &str = "--target=";
     let mut out = String::new();
@@ -504,7 +527,7 @@ pub(crate) fn render_clangd(template: &str, target: &str) -> String {
     out
 }
 
-/// 完整 clone 任务的输入（一次装配，免长参数表）。
+/// Inputs of the full clone job (assembled once, no long parameter list).
 pub(crate) struct CloneJob<'a> {
     pub project_root: &'a Path,
     pub volume_name: &'a str,
@@ -513,14 +536,14 @@ pub(crate) struct CloneJob<'a> {
     pub ref_name: &'a str,
     pub image: &'a str,
     pub dockerfile_dir: &'a Path,
-    /// 全量历史克隆（缺省 false = `--depth 1` 只取树；学习用主目录开 true，
-    /// git log/blame 需要完整历史）。
+    /// Full-history clone (default false = `--depth 1`, tree only; set true for the main
+    /// learning volume, where git log/blame need the full history).
     pub full: bool,
 }
 
-/// 完整 clone：镜像供给 → 幂等建卷（已有内容拒绝）→ git clone（缺省
-/// --depth 1，--full 全量历史）→ .clangd 按架构渲染进源码根 → 写 current。
-/// 返回宿主可见路径。
+/// Full clone: image provisioning → idempotent volume creation (refuses existing content)
+/// → git clone (default --depth 1, --full for full history) → .clangd rendered per arch
+/// into the source root → write current. Returns the host-visible path.
 pub(crate) fn clone_kernel(job: &CloneJob, progress: &mut Progress) -> anyhow::Result<PathBuf> {
     let CloneJob {
         project_root,
@@ -540,14 +563,14 @@ pub(crate) fn clone_kernel(job: &CloneJob, progress: &mut Progress) -> anyhow::R
         .context("failed to run docker volume create (is docker present?)")?;
     anyhow::ensure!(
         out.status.success(),
-        "docker volume create {volume_name} 失败：{}",
+        "docker volume create {volume_name} failed: {}",
         String::from_utf8_lossy(&out.stderr).trim()
     );
 
     let view = host_view(volume_name)?;
     anyhow::ensure!(
         status(&view) == Status::Empty,
-        "volume {volume_name} 已有内容（换 `--as <新卷名>`，或 `virtuoso kernel use` 切过去后走增量构建）"
+        "volume {volume_name} already has content (use `--as <new-volume>` instead, or switch over with `virtuoso kernel use` and build incrementally)"
     );
 
     let depth = if full { "" } else { "--depth 1 " };
@@ -584,28 +607,30 @@ pub(crate) fn clone_kernel(job: &CloneJob, progress: &mut Progress) -> anyhow::R
     Ok(view)
 }
 
-// ---------------------------------------------------------------- devcontainer 渲染
+// ---------------------------------------------------------------- devcontainer rendering
 
-// current 切换 → `.devcontainer/devcontainer.json`（git 忽略）。
+// current switch → `.devcontainer/devcontainer.json` (git-ignored).
 //
-// devkit/docker/devcontainer.json 是静态模板（workspaceMount 钉死缺省卷
-// virtuoso-kernel），对 `--as` 命名的多卷无感知——named volume 的多内核
-// 并存与固定卷名矛盾。这里在 [`write_current`]（clone/use 写 current 的
-// 唯一入口）同步渲染一份活动卷专属的 devcontainer.json：workspaceMount
-// 指向 current 卷，image = 钉死工具链镜像（复用 `KERNEL_TOOLCHAIN_IMAGE`
-// 覆盖；首进免本地 build Dockerfile.kernel）。
+// devkit/docker/devcontainer.json is a static template (workspaceMount pinned to the
+// default volume virtuoso-kernel) and is unaware of multi-volume `--as` naming — the
+// coexistence of several named-volume kernels conflicts with a fixed volume name. Here,
+// inside [`write_current`] (the sole entry point writing current from clone/use), an
+// active-volume-specific devcontainer.json is rendered in sync: workspaceMount points at
+// the current volume, image = the pinned toolchain image (reusing the
+// `KERNEL_TOOLCHAIN_IMAGE` override; the first entry skips a local Dockerfile.kernel build).
 //
-// 落点必须是 repo 根的 `.devcontainer/`：VS Code 的自动发现契约只扫打开
-// 工作区下的 `.devcontainer/`（或根级 devcontainer.json）——放 `.virtuoso/`
-// 就只剩手动选隐藏目录一条路（macOS 文件夹选择器还默认不显示 dotfile）。
-// 打开 repo 根 →「Reopen in Container」即进 current 卷的 /ksrc。
+// The landing spot must be repo-root `.devcontainer/`: VS Code's auto-discovery contract
+// only scans `.devcontainer/` under the opened workspace (or a root-level
+// devcontainer.json) — placing it in `.virtuoso/` leaves manually picking a hidden
+// directory as the only option (and the macOS folder picker hides dotfiles by default).
+// Open the repo root → "Reopen in Container" to enter the current volume's /ksrc.
 
-/// 模板（JSONC，devcontainer.json 规范允许注释）：{VOLUME} / {IMAGE} 由
-/// render_template 替换；customizations 与静态模板保持同源。
-const TEMPLATE: &str = r#"// 由 `virtuoso kernel use/clone` 自动渲染 —— 勿手编，切卷重跑 `virtuoso kernel use`。
-// 打开 repo 根：VS Code →「Reopen in Container」（自动发现本文件）即进 /ksrc。
-// workspace = /ksrc（current 活动 named volume）；镜像 = 钉死工具链
-// （env KERNEL_TOOLCHAIN_IMAGE 渲染时已代入）。
+/// Template (JSONC; the devcontainer.json spec allows comments): {VOLUME} / {IMAGE} are
+/// replaced by render_template; customizations stay in sync with the static template.
+const TEMPLATE: &str = r#"// Auto-rendered by `virtuoso kernel use/clone` — do not hand-edit; re-run `virtuoso kernel use` when switching volumes.
+// Open the repo root: VS Code → "Reopen in Container" (auto-discovers this file) to enter /ksrc.
+// workspace = /ksrc (the current active named volume); image = the pinned toolchain
+// (env KERNEL_TOOLCHAIN_IMAGE substituted at render time).
 {
   "name": "virtuoso-kernel",
   "image": "{IMAGE}",
@@ -620,15 +645,15 @@ const TEMPLATE: &str = r#"// 由 `virtuoso kernel use/clone` 自动渲染 ——
         "ms-azuretools.vscode-docker"
       ],
       "settings": {
-        // clangd 在容器内跑：吃 /ksrc/.clangd + compile_commands.json
+        // clangd runs in-container: consumes /ksrc/.clangd + compile_commands.json
         "clangd.arguments": [
           "--background-index",
           "--clang-tidy=false",
           "--header-insertion=never",
           "--query-driver=/usr/bin/*"
         ],
-        // Rust 侧索引：容器里 make rust-analyzer 产出 rust-project.json，扩展自动拾取
-        // 内核 C 风格：8 空格缩进；Rust 侧走标准 rustfmt 四空格
+        // Rust-side indexing: make rust-analyzer in the container emits rust-project.json, picked up by the extension
+        // Kernel C style: 8-space indent; Rust side follows standard rustfmt 4-space
         "editor.tabSize": 8,
         "[c]": { "editor.insertSpaces": false },
         "[rust]": { "editor.tabSize": 4 },
@@ -644,26 +669,28 @@ const TEMPLATE: &str = r#"// 由 `virtuoso kernel use/clone` 自动渲染 ——
 }
 "#;
 
-/// 渲染产物路径（repo 根 `.devcontainer/devcontainer.json`，git 忽略；落点
-/// 由 VS Code 自动发现契约决定，见上）。
+/// Rendered artifact path (repo-root `.devcontainer/devcontainer.json`, git-ignored; the
+/// landing spot is dictated by VS Code's auto-discovery contract, see above).
 pub(crate) fn devcontainer_path(project_root: &Path) -> PathBuf {
     project_root.join(".devcontainer").join("devcontainer.json")
 }
 
-/// 填模板（volume + image → JSONC 文本）。与写盘分离，测试直接消费。
+/// Fills the template (volume + image → JSONC text). Kept separate from the disk write
+/// so tests can consume it directly.
 pub(crate) fn render_template(volume: &str, image: &str) -> String {
     TEMPLATE
         .replace("{VOLUME}", volume)
         .replace("{IMAGE}", image)
 }
 
-/// 按 current 渲染并写盘（镜像解析 env KERNEL_TOOLCHAIN_IMAGE > ghcr 发布镜像，
-/// 与 kernel 命令组构建容器同源）。返回产物路径。旧落点 `.virtuoso/` 的产物
-/// 一并清除（自动发现契约扫不到它，留着只会误导）。
+/// Renders per current and writes to disk (image resolution: env KERNEL_TOOLCHAIN_IMAGE >
+/// ghcr-published image, same source as the kernel command group's build container).
+/// Returns the artifact path. Artifacts at the legacy `.virtuoso/` landing spot are
+/// removed as well (the auto-discovery contract never scans it; leaving them only misleads).
 pub(crate) fn render(project_root: &Path, current: &Current) -> anyhow::Result<PathBuf> {
     let body = render_template(&current.volume, &resolve_image());
     let p = devcontainer_path(project_root);
-    std::fs::create_dir_all(p.parent().expect("渲染路径必有父目录 .devcontainer"))?;
+    std::fs::create_dir_all(p.parent().expect("render path must have a .devcontainer parent"))?;
     std::fs::write(&p, body)?;
     let legacy = project_root.join(".virtuoso").join("devcontainer.json");
     if legacy.is_file() {
@@ -672,9 +699,10 @@ pub(crate) fn render(project_root: &Path, current: &Current) -> anyhow::Result<P
     Ok(p)
 }
 
-// ---------------------------------------------------------------- 测试
+// ---------------------------------------------------------------- tests
 
-/// 剥 JSONC 注释行（模板头 + 内嵌说明），供测试以 serde_json 校验结构。
+/// Strips JSONC comment lines (template header + inline notes) so tests can validate
+/// the structure with serde_json.
 #[cfg(test)]
 fn json_body(jsonc: &str) -> String {
     jsonc
@@ -688,7 +716,8 @@ fn json_body(jsonc: &str) -> String {
 mod tests {
     use super::*;
 
-    /// 每个测试独立 scratch（并行测试共用 pid 名会互相踩踏）。
+    /// Per-test scratch dir (parallel tests share the pid in the name and would trample
+    /// each other).
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("forge-state-{name}-{}", std::process::id()))
     }
@@ -772,7 +801,7 @@ mod tests {
     #[test]
     fn bpftool_step_pins_recipe_and_arch_guard() {
         let s = bpftool_step(16, Arch::Arm64);
-        // 同构守卫 + 静态配方（-lzstd/-lcrypto 追加在 LIBS 尾部，链接顺序敏感）
+        // same-arch guard + static recipe (-lzstd/-lcrypto at the end of LIBS; order matters)
         assert!(s.contains("[ \"$(uname -m)\" = \"aarch64\" ]"));
         assert!(s.contains("env -u ARCH -u CROSS_COMPILE make -C tools/bpf/bpftool -j16"));
         assert!(s.contains("LDFLAGS=-static"));
@@ -784,7 +813,7 @@ mod tests {
 
     #[test]
     fn shell_quote_escapes_single_quotes() {
-        // 语义钉在 crate::util（shlex.quote：安全字符原样，其余整体包裹）
+        // semantics pinned in crate::util (shlex.quote: safe chars verbatim, the rest wrapped whole)
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("/home/u/ksrc"), "/home/u/ksrc");
@@ -826,11 +855,11 @@ mod tests {
     fn render_targets_current_volume_and_image() {
         let out = render_template("ksrc-oe66", "ghcr.io/yxalix/virtuoso-kernel:latest");
         let v: serde_json::Value =
-            serde_json::from_str(&json_body(&out)).expect("渲染产物须为合法 JSON");
+            serde_json::from_str(&json_body(&out)).expect("rendered output must be valid JSON");
         assert_eq!(v["workspaceMount"], "src=ksrc-oe66,dst=/ksrc,type=volume");
         assert_eq!(v["workspaceFolder"], "/ksrc");
         assert_eq!(v["image"], "ghcr.io/yxalix/virtuoso-kernel:latest");
-        // 加速首进：image 直用钉死工具链，不再本地 build Dockerfile.kernel
+        // first entry fast path: image uses the pinned toolchain, no local Dockerfile.kernel build
         assert!(v.get("build").is_none());
         assert_eq!(v["remoteUser"], "root");
         let ext = v["customizations"]["vscode"]["extensions"]

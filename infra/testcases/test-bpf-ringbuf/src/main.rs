@@ -1,15 +1,18 @@
-//! test-bpf-ringbuf —— 程序态 eBPF 试点：aya 加载 .bpf.o → kprobe 挂接 →
-//! ringbuf 结构化事件回流。
+//! test-bpf-ringbuf — programmatic eBPF pilot: aya loads a .bpf.o, attaches
+//! a kprobe, and structured events flow back over the ringbuf.
 //!
-//! 证明链三步各有断言：宿主 clang 产的 BPF 目标码能被 VM 内核接受（加载）；
-//! aya（纯 Rust）musl 静态可完成挂接（kprobe 走 perf PMU）；事件经 ringbuf
-//! 回到用户态且可结构化解码（AI-native 观测的最小闭环）。触发即本用例
-//! 自己 unlink 一个文件——kprobe 同步触发，事件 pid 必等于本进程 pid，
-//! 无时序赌博。程序本体见 `bpf/unlink.bpf.c`。
+//! Each step of the proof chain gets an assertion: the BPF object built by
+//! host clang is accepted by the VM kernel (load); aya (pure Rust), static
+//! musl, can attach (kprobe via perf PMU); events return to user space over
+//! the ringbuf and decode structurally (the minimal AI-native observability
+//! loop). The trigger is the test case unlinking its own file — the kprobe
+//! fires synchronously, so the event pid must equal this process's pid; no
+//! timing gambles. The program itself lives in `bpf/unlink.bpf.c`.
 //!
-//! 宿主 check 兼容：aya 是 Linux-only 依赖（bpf syscall + Linux libc 符号），
-//! 经 `[target.'cfg(target_os = "linux")']` 注入；非 Linux 宿主（macOS 上的
-//! IDE check/clippy）只编框架壳，TESTS 走空。
+//! Host check compatibility: aya is a Linux-only dependency (bpf syscall +
+//! Linux libc symbols), injected via `[target.'cfg(target_os = "linux")']`;
+//! non-Linux hosts (IDE check/clippy on macOS) compile only the framework
+//! shell and TESTS stays empty.
 
 use coda::{run_and_exit, TestCase};
 
@@ -29,15 +32,17 @@ mod bpf {
     use aya::maps::RingBuf;
     use aya::programs::KProbe;
 
-    /// build.rs 编出的 eBPF 目标码（unlink.bpf.o），include_bytes! 直接嵌进
-    /// 本二进制：.bpf.o 不落 rootfs，VM 内零文件依赖。
+    /// eBPF object built by build.rs (unlink.bpf.o), embedded straight into
+    /// this binary via include_bytes!: the .bpf.o never lands in the rootfs,
+    /// so the VM has zero file dependencies.
     static BPF_OBJ: &[u8] = include_bytes!(env!("VIRTUOSO_BPF_UNLINK_BPF"));
 
     const KPROBE_SYM: &str = "do_unlinkat";
     const TRIGGER: &str = "/tmp/virtuoso-bpf-ringbuf.trigger";
     const EVENT_WAIT: Duration = Duration::from_secs(5);
 
-    /// ringbuf 记录布局（bpf/unlink.bpf.c 的 struct event，小端）。
+    /// Ringbuf record layout (struct event from bpf/unlink.bpf.c,
+    /// little-endian).
     struct Event {
         pid: u32,
         comm: String,
@@ -60,7 +65,8 @@ mod bpf {
     }
 
     pub(super) fn bpf_ringbuf_events() -> bool {
-        // 1. 解析加载：BTF map 定义（SEC(".maps")）+ kprobe 段都要过 aya-obj
+        // 1. Parse and load: both the BTF map definitions (SEC(".maps")) and
+        // the kprobe section must pass aya-obj
         let mut bpf = match aya::Ebpf::load(BPF_OBJ) {
             Ok(bpf) => {
                 coda::pass!(".bpf.o loaded ({} bytes)", BPF_OBJ.len());
@@ -72,7 +78,8 @@ mod bpf {
             }
         };
 
-        // 2. 挂接 kprobe（aya：perf PMU 优先，tracefs kprobe_events 兜底）
+        // 2. Attach the kprobe (aya: perf PMU first, tracefs kprobe_events
+        // fallback)
         let prog: &mut KProbe = match bpf
             .program_mut("on_unlink")
             .expect("program on_unlink exists")
@@ -94,11 +101,13 @@ mod bpf {
         }
         coda::pass!("kprobe attached: {KPROBE_SYM}");
 
-        // 3. 挂接后触发：本进程 unlink 一个文件，do_unlinkat 必命中
+        // 3. Trigger after attach: this process unlinks a file, so
+        // do_unlinkat must be hit
         std::fs::write(TRIGGER, b"x").expect("write trigger file");
         let _ = std::fs::remove_file(TRIGGER);
 
-        // 4. 轮询 ringbuf 收事件，等 pid == 本进程的那条
+        // 4. Poll the ringbuf for events, waiting for the one whose pid
+        // equals this process
         let mut rb = match RingBuf::try_from(bpf.map_mut("events").expect("map events exists")) {
             Ok(rb) => rb,
             Err(e) => {
@@ -112,7 +121,8 @@ mod bpf {
             if let Some(item) = rb.next() {
                 match decode_event(&item) {
                     Some(ev) => {
-                        // 结构化事件行：AI-native 观测的输出形态（串口/工件可回放）
+                        // Structured event line: the AI-native observability
+                        // output shape (replayable from serial/artifacts)
                         coda::info!("event {{\"pid\":{},\"comm\":\"{}\"}}", ev.pid, ev.comm);
                         if ev.pid == std::process::id() {
                             got = true;

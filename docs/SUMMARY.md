@@ -1,29 +1,29 @@
 # Summary
 
-[总览](index.md)
+[Overview](index.md)
 
-# 入门
+# Getting Started
 
-- [快速开始](quick-start.md)
+- [Quick Start](quick-start.md)
 
-# 使用
+# Usage
 
-- [CLI 参考](usage/cli.md)
-- [配置参考](usage/configuration.md)
-- [编写测试用例](usage/writing-tests.md)
-- [调试](usage/debugging.md)
-- [运行工件与分诊](usage/artifacts.md)
-- [AI 集成](usage/ai-integration.md)
-- [故障排查](usage/troubleshooting.md)
+- [CLI Reference](usage/cli.md)
+- [Configuration Reference](usage/configuration.md)
+- [Writing Test Cases](usage/writing-tests.md)
+- [Debugging](usage/debugging.md)
+- [Run Artifacts and Triage](usage/artifacts.md)
+- [AI Integration](usage/ai-integration.md)
+- [Troubleshooting](usage/troubleshooting.md)
 
-# 概念与契约
+# Concepts and Contracts
 
-- [设计与理念](concepts/design.md)
-- [供给与构建流水线](concepts/pipeline.md)
-- [两段式引导](concepts/boot.md)
-- [冻结契约](concepts/contracts.md)
-- [组件机制](concepts/components.md)
+- [Design and Philosophy](concepts/design.md)
+- [Provisioning and Build Pipeline](concepts/pipeline.md)
+- [Two-Stage Boot](concepts/boot.md)
+- [Frozen Contracts](concepts/contracts.md)
+- [Component Mechanics](concepts/components.md)
 
-# 参与
+# Contributing
 
-- [贡献约定](contributing.md)
+- [Contribution Guidelines](contributing.md)

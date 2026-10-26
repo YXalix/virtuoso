@@ -1,17 +1,17 @@
-//! argv 装配：完整 argv 与 run-qemu.sh 的展开顺序逐字对齐
-//! （machine, memory-backend, numa, kvm, cpu, smp, m, kernel, initrd,
-//! append, rootfs drive, data disks, extra, console, options, debug）。
+//! argv assembly: the full argv matches run-qemu.sh's expansion order verbatim
+//! (machine, memory-backend, numa, kvm, cpu, smp, m, kernel, initrd,
+//! append, rootfs drive, data disks, extra, console, options, debug).
 
 use crate::HostOs;
 
 use super::{Accel, QemuInvocation};
 
 impl QemuInvocation {
-    /// 完整 argv，与 run-qemu.sh 的展开顺序逐字对齐：
+    /// Full argv, matching run-qemu.sh's expansion order verbatim:
     /// machine, memory-backend, numa, kvm, cpu, smp, m, kernel, initrd,
-    /// append, rootfs drive, data disks, extra, console, options, debug。
+    /// append, rootfs drive, data disks, extra, console, options, debug.
     pub(crate) fn argv(&self) -> anyhow::Result<Vec<String>> {
-        // accel × 宿主平台合法性（错误前置到 argv 构造期，而非留给 QEMU 报）
+        // accel × host-platform validity (errors surface at argv construction, not left to QEMU)
         match (self.accel, self.host) {
             (Accel::Kvm, HostOs::Darwin) => {
                 anyhow::bail!(
@@ -36,10 +36,11 @@ impl QemuInvocation {
         Ok(args)
     }
 
-    /// -machine + 内存后端（单节点 memory-backend=mem 关联 / 多节点逐节点
-    /// -object+-numa / pmem 换文件后端 share=on）。Linux 基线冻结用 memfd
-    /// 后端；macOS QEMU 无 memfd_create，换 ram（形态等价：同为普通匿名
-    /// 内存，share 语义 ram 恒 off 不需显式声明）。
+    /// -machine + memory backend (single node: memory-backend=mem linked on the machine /
+    /// multi-node: per-node -object+-numa / pmem: swap to a file backend with share=on).
+    /// The Linux baseline freezes on the memfd backend; macOS QEMU lacks memfd_create,
+    /// so ram is used (equivalent shape: both are plain anonymous memory; with ram the
+    /// share semantics are always off and need no explicit declaration).
     fn mem_backend(&self, id: &str, size: &str) -> String {
         match self.host {
             HostOs::Linux => format!("memory-backend-memfd,id={id},size={size},share=off"),
@@ -73,8 +74,9 @@ impl QemuInvocation {
                 args.push(format!("node,nodeid={i},memdev=mem{i},cpus={start}-{end}"));
             }
         } else if let Some(pmem) = &self.pmem {
-            // 主内存换文件后端（share=on）：DT 挖出的 pmem 区即宿主文件
-            // backed，guest 写入持久落盘（两平台同形）
+            // main memory swaps to a file backend (share=on): the pmem region carved out
+            // of DT is host-file backed, so guest writes persist to disk (same shape on
+            // both platforms)
             args.push("-object".into());
             args.push(format!(
                 "memory-backend-file,id=mem,mem-path={},size={total_mem},share=on",
@@ -87,7 +89,7 @@ impl QemuInvocation {
         Ok(())
     }
 
-    /// 加速器开关 + -cpu + -smp。
+    /// Accelerator switches + -cpu + -smp.
     fn push_accel_cpu_smp(&self, args: &mut Vec<String>) {
         match self.accel {
             Accel::Kvm => args.push("-enable-kvm".into()),
@@ -115,7 +117,7 @@ impl QemuInvocation {
         }
     }
 
-    /// -m / -kernel / -initrd / -append /（pmem -dtb）/ rootfs drive / 数据盘。
+    /// -m / -kernel / -initrd / -append / (pmem -dtb) / rootfs drive / data disks.
     fn push_boot_and_drives(&self, args: &mut Vec<String>, total_mem: &str) {
         args.push("-m".into());
         args.push(total_mem.to_string());
@@ -127,8 +129,8 @@ impl QemuInvocation {
         args.push(self.cmdline());
 
         if let Some(pmem) = &self.pmem {
-            // 补丁后的设备树（/memory 挖出 pmem 区 + 根节点 pmem-region），
-            // 替换 QEMU 生成版 —— of_pmem 据此注册 /dev/pmem0
+            // patched device tree (pmem region carved out of /memory + root pmem-region
+            // node), replacing the QEMU-generated one — of_pmem registers /dev/pmem0 from it
             args.push("-dtb".into());
             args.push(pmem.dtb.display().to_string());
         }
@@ -145,7 +147,7 @@ impl QemuInvocation {
         }
     }
 
-    /// AI agent 通道（virtio-serial chardev + 端口设备）。
+    /// AI agent channel (virtio-serial chardev + port device).
     fn push_agent_channel(&self, args: &mut Vec<String>) {
         if let Some(sock) = &self.agent_serial {
             args.push("-chardev".into());
@@ -160,7 +162,7 @@ impl QemuInvocation {
         }
     }
 
-    /// extra_opts 透传与收尾参数（console / -no-reboot / gdb stub）。
+    /// extra_opts passthrough and closing args (console / -no-reboot / gdb stub).
     fn push_tail(&self, args: &mut Vec<String>) {
         for opt in &self.extra_opts {
             args.extend(opt.split_whitespace().map(str::to_string));
@@ -193,7 +195,7 @@ mod tests {
             "/tmp/rootfs.img",
         )
         .topo(NumaTopology::parse("8", "2", "1G").unwrap())
-        // 冻结基线按宿主平台各持一份：单测显式钉死，不随编译目标漂移
+        // the frozen baseline is per host platform; unit tests pin it, no drift with the target
         .host_os(HostOs::Linux)
     }
 
@@ -212,7 +214,7 @@ mod tests {
             .contains("-append console=ttyAMA0 root=/dev/vda rw init=/init loglevel=8 auto_test"));
         assert!(joined.contains("-drive file=/tmp/rootfs.img,format=raw,if=virtio"));
         assert!(joined.contains("-nographic -serial mon:stdio -no-reboot"));
-        // 顺序约束：machine 必须最先，-no-reboot 在 console 之后
+        // ordering constraint: machine comes first, -no-reboot after console
         assert_eq!(args[0], "-machine");
         let pos = |p: &str| args.iter().position(|a| a == p).unwrap();
         assert!(pos("-serial") < pos("-no-reboot"));
@@ -243,8 +245,9 @@ mod tests {
 
     #[test]
     fn argv_darwin_frozen_baseline_uses_ram_backend() {
-        // darwin 基线：无 memfd（macOS QEMU 未编译该后端），单节点与
-        // NUMA 每节点均换 memory-backend-ram（ram 恒非共享，无 share= 字段）
+        // darwin baseline: no memfd (macOS QEMU is not built with that backend); both the
+        // single node and each NUMA node switch to memory-backend-ram (ram is never
+        // shared, no share= field)
         let args = base_inv()
             .host_os(HostOs::Darwin)
             .topo(NumaTopology::parse("8", "1", "2G").unwrap())
@@ -303,12 +306,12 @@ mod tests {
             .unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("-drive file=/tmp/tools.img,format=raw,if=virtio"));
-        // NVMe 测试盘已移除：不再出现 blockdev/nvme 设备
+        // NVMe test disk removed: no blockdev/nvme devices anymore
         assert!(!joined.contains("-blockdev"));
         assert!(!joined.contains("nvme"));
         assert!(joined.contains("-s -S"));
         assert!(joined.contains("-device vfio-pci,host=00:01.0"));
-        // 顺序：数据盘紧跟 rootfs drive 之后、extra_opts 之前
+        // ordering: data disks right after the rootfs drive, before extra_opts
         let pos = |p: &str| args.iter().position(|a| a.contains(p)).unwrap();
         assert!(pos("file=/tmp/rootfs.img") < pos("file=/tmp/tools.img"));
     }
@@ -338,21 +341,21 @@ mod tests {
 
     #[test]
     fn no_data_disks_keeps_baseline_argv() {
-        // 冻结不变量 3：缺省（无数据盘）argv 与 run-qemu.sh 基线逐字一致
+        // frozen invariant 3: default (no data disks) argv matches the run-qemu.sh baseline verbatim
         let args = base_inv().argv().unwrap();
         let joined = args.join(" ");
         assert_eq!(
             joined.matches("-drive").count(),
             1,
-            "只有 rootfs 一个 -drive"
+            "only the rootfs -drive is present"
         );
         assert!(!joined.contains("-blockdev"));
-        assert!(!joined.contains("nvdimm"), "缺省不得出现 nvdimm");
+        assert!(!joined.contains("nvdimm"), "nvdimm must not appear by default");
     }
 
     #[test]
     fn pmem_swaps_ram_backend_adds_dtb_and_mem_limit() {
-        // 单节点：主内存换文件后端（share=on）+ -dtb + cmdline mem=
+        // single node: main memory swaps to a file backend (share=on) + -dtb + cmdline mem=
         let inv = QemuInvocation::new(Arch::X86_64, "k", "i", "r")
             .topo(NumaTopology::parse("4", "1", "2G").unwrap())
             .host_os(HostOs::Linux)
@@ -365,12 +368,12 @@ mod tests {
         let args = inv.argv().unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("-machine virt,memory-backend=mem"));
-        assert!(!joined.contains("nvdimm"), "DT 途径不使用 QEMU nvdimm 设备");
+        assert!(!joined.contains("nvdimm"), "the DT route uses no QEMU nvdimm device");
         assert!(joined
             .contains("-object memory-backend-file,id=mem,mem-path=/tmp/ram.img,size=2G,share=on"));
         assert!(joined.contains("-dtb /tmp/virt.dtb"));
         assert!(joined.contains("mem=1792M"));
-        // 顺序：-dtb 跟在 -append 之后、-drive 之前
+        // ordering: -dtb after -append, before -drive
         let pos = |p: &str| args.iter().position(|a| a.contains(p)).unwrap();
         assert!(pos("-append") < pos("-dtb"));
         assert!(pos("-dtb") < pos("-drive"));
@@ -392,7 +395,7 @@ mod tests {
 
     #[test]
     fn agent_serial_off_by_default_keeps_baseline_argv() {
-        // 冻结不变量 3：未启用 agent 通道时 argv 与基线逐字一致
+        // frozen invariant 3: with the agent channel off, argv is verbatim-identical to the baseline
         let joined = base_inv().argv().unwrap().join(" ");
         assert!(!joined.contains("virtio-serial"));
         assert!(!joined.contains("chardev"));
@@ -411,7 +414,7 @@ mod tests {
         assert!(joined.contains("-device virtio-serial-pci,id=virtio-serial0"));
         assert!(joined
             .contains("-device virtserialport,chardev=agentch,id=agentport,name=virtuoso-agent"));
-        // 顺序约束：agent 设备在盘之后、-nographic 之前
+        // ordering constraint: agent devices after drives, before -nographic
         let pos = |p: &str| args.iter().position(|a| a.contains(p)).unwrap();
         assert!(pos("-drive") < pos("-chardev"));
         assert!(pos("virtserialport") < pos("-nographic"));

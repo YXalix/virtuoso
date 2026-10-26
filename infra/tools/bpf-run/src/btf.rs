@@ -1,10 +1,13 @@
-//! bpf-run 的 BTF 迷你解析器与 JSON 解码。
+//! bpf-run's miniature BTF parser and JSON decoding.
 //!
-//! aya-obj 的 BTF 内省不对外（成员访问器 pub(crate)），完整 BTF 解析又远超
-//! 本工具所需；这里按 Documentation/btf.rst 直读 .BTF 段（小端 v1 格式），
-//! 只覆盖事件解码所需形态：Int / Array / Struct / Enum / Enum64 / Ptr /
-//! Typedef 与 cv 限定符穿透 / Var / DataSec（ringbuf 地图发现）。
-//! 位域成员跳过（其余字段照常解码）；Union 与未支持形态 hex 兜底。
+//! aya-obj's BTF introspection is not public (member accessors are
+//! pub(crate)), and full BTF parsing far exceeds this tool's needs; here the
+//! .BTF section is read directly per Documentation/btf.rst (little-endian v1
+//! format), covering only the shapes event decoding needs: Int / Array /
+//! Struct / Enum / Enum64 / Ptr / Typedef with cv-qualifier pass-through /
+//! Var / DataSec (ringbuf map discovery).
+//! Bitfield members are skipped (other fields decode as usual); unions and
+//! unsupported shapes fall back to hex.
 
 use serde_json::{json, Map, Value};
 
@@ -86,7 +89,7 @@ const KIND_DECL_TAG: u32 = 17;
 const KIND_TYPE_TAG: u32 = 18;
 const KIND_ENUM64: u32 = 19;
 
-/// BPF_MAP_TYPE_RINGBUF（uapi bpf.h，数字冻结）
+/// BPF_MAP_TYPE_RINGBUF (uapi bpf.h, frozen number)
 const MAP_TYPE_RINGBUF: u32 = 27;
 
 impl Btf {
@@ -127,7 +130,7 @@ impl Btf {
                 .ok_or_else(|| "BTF: type data truncated".into())
         };
 
-        // 类型 id 0 = void 占位
+        // Type id 0 = void placeholder
         let mut out: Vec<Type> = vec![Type::Void];
         let mut off = 0usize;
         while off < types.len() {
@@ -138,7 +141,8 @@ impl Btf {
             let kflag = info & 0x8000_0000 != 0;
             let t_or_size = tu32(off + 8)?;
             let pos = off + 12;
-            // 各 kind 的定长载荷，先整体定界再读，未知 kind 报错防错位
+            // Fixed-size payload per kind: delimit the whole record before
+            // reading; unknown kinds error out to prevent desync
             let payload = match kind {
                 KIND_INT => 4,
                 KIND_ARRAY => 12,
@@ -181,16 +185,18 @@ impl Btf {
                         let m_name = string_at(&strings, tu32(m)?);
                         let m_ty = tu32(m + 4)?;
                         let m_bits = tu32(m + 8)?;
-                        // 成员 offset 恒按 bit 读：clang 对 kflag=0 也发 bit
-                        // 偏移（实测 map struct max_entries raw=0x40=byte 8）；
-                        // kflag=1 时低 24 位同义、高 8 位为位域宽。
+                        // Member offsets are always read as bits: clang emits
+                        // bit offsets even with kflag=0 (observed: map struct
+                        // max_entries raw=0x40 = byte 8); with kflag=1 the
+                        // low 24 bits mean the same and the high 8 bits are
+                        // the bitfield width.
                         let (bit_off, bf_size) = if kflag {
                             (m_bits & 0x00ff_ffff, m_bits >> 24)
                         } else {
                             (m_bits, 0)
                         };
                         if bf_size != 0 || m_name.is_empty() {
-                            continue; // 位域与匿名成员跳过
+                            continue; // skip bitfields and anonymous members
                         }
                         members.push(Member {
                             name: m_name,
@@ -264,7 +270,8 @@ impl Btf {
         self.types.get(id as usize).unwrap_or(&Type::Void)
     }
 
-    /// 穿透 typedef 与 cv 限定符（深度上限防循环）。
+    /// Pass through typedefs and cv qualifiers (depth cap guards against
+    /// cycles).
     pub fn resolve(&self, mut id: u32) -> u32 {
         for _ in 0..16 {
             match self.get(id) {
@@ -286,7 +293,8 @@ impl Btf {
         }
     }
 
-    /// 全部复合类型概览（name, is_struct, size）——调试与诊断用。
+    /// Overview of all composite types (name, is_struct, size) — for
+    /// debugging and diagnostics.
     pub fn comps(&self) -> Vec<(String, bool, u32)> {
         self.types
             .iter()
@@ -299,7 +307,8 @@ impl Btf {
             .collect()
     }
 
-    /// 类型表一行摘要（调试用）：id / kind / name / members。
+    /// One-line summary per type table entry (debugging): id / kind / name /
+    /// members.
     pub fn dump_types(&self) -> Vec<String> {
         self.types
             .iter()
@@ -333,7 +342,8 @@ impl Btf {
             .collect()
     }
 
-    /// 全部具名 struct/union（自动解码候选），返回 (类型 id, 字节大小)。
+    /// All named structs/unions (auto-decode candidates); returns (type id,
+    /// size in bytes).
     pub fn named_comps(&self) -> Vec<(u32, usize)> {
         self.types
             .iter()
@@ -347,7 +357,8 @@ impl Btf {
             .collect()
     }
 
-    /// 按名字找 struct/union（含 typedef 别名），返回 (类型 id, 字节大小)。
+    /// Find a struct/union by name (including typedef aliases); returns
+    /// (type id, size in bytes).
     pub fn comp_by_name(&self, name: &str) -> Option<(u32, u32)> {
         let direct = self.types.iter().enumerate().position(|(_, t)| {
             matches!(t, Type::Comp { name: n, .. } if n == name)
@@ -362,7 +373,8 @@ impl Btf {
         Some((id, size))
     }
 
-    /// BTF 定义的 RINGBUF 地图名（.maps datasec → Var → 成员 "type" = 27）。
+    /// Names of BTF-defined RINGBUF maps (.maps datasec, then Var, then
+    /// member "type" = 27).
     pub fn ringbuf_maps(&self) -> Vec<String> {
         let mut out = Vec::new();
         for t in &self.types {
@@ -383,7 +395,8 @@ impl Btf {
                     if m.name != "type" {
                         continue;
                     }
-                    // __uint(type, 27) = int (*type)[27]：Ptr → Array，len 即值
+                    // __uint(type, 27) = int (*type)[27]: Ptr, then Array;
+                    // len is the value
                     let kind = match self.get(self.resolve(m.ty)) {
                         Type::Ptr(p) => match self.get(self.resolve(*p)) {
                             Type::Array { len, .. } => Some(*len),
@@ -401,7 +414,8 @@ impl Btf {
         out
     }
 
-    /// 事件记录 → JSON 值。深度超限或未支持形态由调用方 hex 兜底。
+    /// Event record to JSON value. Depth overflow and unsupported shapes
+    /// leave the hex fallback to the caller.
     pub fn decode(&self, id: u32, data: &[u8], depth: usize) -> Value {
         if depth > 4 {
             return hex(data);
@@ -429,9 +443,10 @@ impl Btf {
                 if es == 0 || data.len() < es * *len as usize {
                     return hex(data);
                 }
-                // 单字节整型数组 → 字符串（NUL 截断）：char[N] 文本字段，
-                // 与 bpftrace 对 char[] 的呈现一致；clang 对 plain char
-                // 不打 CHAR 编码位，故按 size==1 判定（bool 数组除外）。
+                // Single-byte integer arrays become strings (NUL-truncated):
+                // char[N] text fields, matching bpftrace's presentation of
+                // char[]; clang does not set the CHAR encoding bit for plain
+                // char, hence the size==1 test (bool arrays excluded).
                 if let Type::Int { size, boolean, .. } = self.get(self.resolve(*elem)) {
                     if *size == 1 && !*boolean {
                         let end = data[..es * *len as usize]
@@ -475,12 +490,13 @@ impl Btf {
                 let v = u64::from_le_bytes(data[..8].try_into().expect("bounded"));
                 json!(format!("0x{v:016x}"))
             }
-            _ => hex(data), // Union、Float、未知形态
+            _ => hex(data), // union, float, unknown shapes
         }
     }
 }
 
-/// 无符号按字节拼装（小端）+ 位宽截断 + 有符号扩展 + bool/char 语义。
+/// Unsigned byte assembly (little-endian) + bit-width truncation + sign
+/// extension + bool/char semantics.
 fn int_value(data: &[u8], size: u32, bits: u32, signed: bool, boolean: bool) -> Value {
     let size = (size as usize).clamp(1, 8);
     let mut v = 0u64;
@@ -516,7 +532,8 @@ fn string_at(strings: &[u8], off: u32) -> String {
     String::from_utf8_lossy(&strings[start..end]).into_owned()
 }
 
-/// 兜底：整段记录 hex（解码器无法表达时的可传输形态）。
+/// Fallback: the whole record as hex (the transportable form when the
+/// decoder cannot express it).
 pub fn hex(data: &[u8]) -> Value {
     let mut s = String::with_capacity(data.len() * 2);
     for b in data {
@@ -529,16 +546,20 @@ pub fn hex(data: &[u8]) -> Value {
 mod tests {
     use super::*;
 
-    /// 手搭最小 BTF：struct event { u32 pid; char tag[16]; }（kflag=0，
-    /// 成员 offset 为 bit）+ 一个 8 字节成员的匿名 struct，锁死三个实测
-    /// 回归点：FUNC_PROTO 载荷步进、成员 bit 偏移、单字节数组按字符串解。
-    /// 字节构造后先自证 walk 对齐（dump 长度 = 输入长度）。
+    /// Hand-assembled minimal BTF: struct event { u32 pid; char tag[16]; }
+    /// (kflag=0, member offsets in bits) plus an anonymous struct with an
+    /// 8-byte member, pinning three observed regression points: FUNC_PROTO
+    /// payload stride, member bit offsets, single-byte arrays decoding as
+    /// strings. After building the bytes, first assert walk alignment (dump
+    /// length = input length).
     fn fixture() -> Btf {
-        // 手搭最小 BTF：struct event { u32 pid; char tag[16]; }（kflag=0，
-        // 成员 offset 为 bit）+ 匿名 map struct（成员 type = Ptr→Array(27)，
-        // 即 `int (*type)[27]` 的真实形态）+ Var + FuncProto + DataSec。
-        // 锁死三个实测回归点：FuncProto 载荷步进（vlen*8）、成员 bit 偏移、
-        // 单字节数组按字符串解。字符串表先建，偏移回填类型引用。
+        // Hand-assembled minimal BTF: struct event { u32 pid; char tag[16]; }
+        // (kflag=0, member offsets in bits) + anonymous map struct (member
+        // type = Ptr, then Array(27) — the real shape of `int (*type)[27]`)
+        // + Var + FuncProto + DataSec. Pins three observed regression points:
+        // FuncProto payload stride (vlen*8), member bit offsets, single-byte
+        // arrays decoding as strings. String table first; type references are
+        // backfilled with offsets.
         let mut strings: Vec<u8> = vec![0]; // offset 0 = ""
         let put = |s: &mut Vec<u8>, name: &str| -> u32 {
             let off = s.len() as u32;
@@ -555,45 +576,47 @@ mod tests {
 
         let mut t: Vec<u8> = Vec::new();
         let w = |t: &mut Vec<u8>, v: u32| t.extend(v.to_le_bytes());
-        // id1: Int "unsigned int" size4（enc=0, bits=32）
+        // id1: Int "unsigned int" size4 (enc=0, bits=32)
         w(&mut t, 0);
         w(&mut t, 1 << 24);
         w(&mut t, 4);
         w(&mut t, 32 << 8);
-        // id2: Int "char" size1（enc=0——clang 实测不打 CHAR 位）
+        // id2: Int "char" size1 (enc=0 — observed: clang does not set the CHAR bit)
         w(&mut t, 0);
         w(&mut t, 1 << 24);
         w(&mut t, 1);
         w(&mut t, 8 << 8);
-        // id3: Array(elem=2, len=16) —— char[16]
+        // id3: Array(elem=2, len=16) — char[16]
         w(&mut t, 0);
         w(&mut t, 3 << 24);
         w(&mut t, 0);
         w(&mut t, 2); // elem
         w(&mut t, 0); // index
         w(&mut t, 16); // len
-        // id4: Struct "event" size20 vlen=2 kflag=0（成员 offset 为 bit）
+        // id4: Struct "event" size20 vlen=2 kflag=0 (member offsets in bits)
         w(&mut t, off_event);
         w(&mut t, (4 << 24) | 2);
         w(&mut t, 20);
         w(&mut t, off_pid); // pid: ty=1 @bit0
         w(&mut t, 1);
         w(&mut t, 0);
-        w(&mut t, off_tag); // tag: ty=3 @bit32 = byte 4（回归点）
+        w(&mut t, off_tag); // tag: ty=3 @bit32 = byte 4 (regression point)
         w(&mut t, 3);
         w(&mut t, 32);
-        // id5: Array(elem=1, len=27) —— `int (*type)[27]` 的数组，len 即值
+        // id5: Array(elem=1, len=27) — the array of `int (*type)[27]`; len
+        // is the value
         w(&mut t, 0);
         w(&mut t, 3 << 24);
         w(&mut t, 0);
         w(&mut t, 1); // elem
         w(&mut t, 0); // index
-        w(&mut t, 27); // len = BPF_MAP_TYPE_RINGBUF（回归点）
+        w(&mut t, 27); // len = BPF_MAP_TYPE_RINGBUF (regression point)
         // id6: Ptr(→5)
         w(&mut t, 0);
         w(&mut t, 2 << 24);
         w(&mut t, 5);
-        // id7: Struct "" size16 vlen=1（匿名 map struct，成员 type → Ptr）
+        // id7: Struct "" size16 vlen=1 (anonymous map struct, member type →
+        // Ptr)
         w(&mut t, 0);
         w(&mut t, (4 << 24) | 1);
         w(&mut t, 16);
@@ -605,7 +628,7 @@ mod tests {
         w(&mut t, 14 << 24);
         w(&mut t, 7);
         w(&mut t, 0);
-        // id9: FuncProto vlen=1（回归点：载荷 = vlen*8）
+        // id9: FuncProto vlen=1 (regression point: payload = vlen*8)
         w(&mut t, 0);
         w(&mut t, (13 << 24) | 1);
         w(&mut t, 0);
@@ -626,7 +649,7 @@ mod tests {
         blob.extend(24u32.to_le_bytes()); // hdr_len
         blob.extend(0u32.to_le_bytes()); // type_off
         blob.extend((t.len() as u32).to_le_bytes());
-        blob.extend((t.len() as u32).to_le_bytes()); // str_off 紧随 types
+        blob.extend((t.len() as u32).to_le_bytes()); // str_off right after types
         blob.extend((strings.len() as u32).to_le_bytes());
         blob.extend_from_slice(&t);
         blob.extend_from_slice(&strings);
@@ -636,10 +659,11 @@ mod tests {
     #[test]
     fn walk_aligned_and_names_resolved() {
         let btf = fixture();
-        // walk 对齐：FuncProto 载荷步进错就会把后续类型读歪（实测回归点）
+        // walk alignment: a wrong FuncProto payload stride would skew every
+        // later type (observed regression point)
         assert_eq!(btf.comp_by_name("event"), Some((4, 20)));
         assert_eq!(btf.ringbuf_maps(), vec!["events".to_string()]);
-        // 匿名 struct 不进自动解码候选
+        // anonymous structs stay out of the auto-decode candidates
         assert_eq!(btf.named_comps(), vec![(4, 20)]);
     }
 
@@ -653,14 +677,15 @@ mod tests {
         let v = btf.decode(id, &rec, 0);
         let obj = v.as_object().unwrap();
         assert_eq!(obj["pid"], 287454020);
-        assert_eq!(obj["tag"], "hello"); // 单字节数组按字符串（NUL 截断）
+        assert_eq!(obj["tag"], "hello"); // single-byte array as string (NUL-truncated)
     }
 
     #[test]
     fn hex_fallback_for_unmatched_records() {
         let btf = fixture();
         let (id, _) = btf.comp_by_name("event").unwrap();
-        // 长度不足的记录：可解成员逐个跳过 → 空对象，不 panic 不误读
+        // Record shorter than the struct: members that do not fit are
+        // skipped one by one, giving an empty object; no panic, no misread
         let v = btf.decode(id, &[0u8; 3], 0);
         assert!(v.as_object().unwrap().is_empty());
     }

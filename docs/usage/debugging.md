@@ -1,43 +1,44 @@
-# 调试
+# Debugging
 
-## 交互 shell
+## Interactive Shell
 
 ```bash
-virtuoso shell            # TCG（跨架构适用）
-virtuoso shell --kvm      # 原生加速（宿主 = 目标架构时）
+virtuoso shell            # TCG (works across architectures)
+virtuoso shell --kvm      # native acceleration (when host = target architecture)
 ```
 
-退出：`Ctrl-A` 然后 `x`。rootfs 里保留全部 `/tests/*` 用例，可手动复跑单个
-测试复现失败。
+To exit: `Ctrl-A` then `x`. All `/tests/*` cases remain in the rootfs, so you can re-run an
+individual test by hand to reproduce a failure.
 
-## GDB 源码级内核调试
+## GDB Source-Level Kernel Debugging
 
-内核开 `CONFIG_DEBUG_INFO=y`（建议加 `CONFIG_DEBUG_INFO_DWARF5=y`、
-`CONFIG_GDB_SCRIPTS=y`）。
+Build the kernel with `CONFIG_DEBUG_INFO=y` (adding `CONFIG_DEBUG_INFO_DWARF5=y` and
+`CONFIG_GDB_SCRIPTS=y` is recommended).
 
 ```bash
-virtuoso shell --gdb      # 终端 1：挂起启动，监听 :1234
-cd "$KERNEL_PATH" && \    # 终端 2：
+virtuoso shell --gdb      # terminal 1: suspended boot, listening on :1234
+cd "$KERNEL_PATH" && \    # terminal 2:
 gdb-multiarch vmlinux -ex 'target remote :1234'
 ```
 
-## AI probe（virtio-serial 通道）
+## AI probe (virtio-serial Channel)
 
 ```bash
 virtuoso probe --cmd 'uname -a' --cmd 'dmesg | tail'
-virtuoso probe --cmd-file cmds.txt --json    # 机器可读事件流
+virtuoso probe --cmd-file cmds.txt --json    # machine-readable event stream
 ```
 
-经 guest 侧 virtuoso-agent（JSON 行协议）下发命令批，事件流写 run 目录的
-`agent-events.jsonl`。通道详解见[组件机制 agent 一节](../concepts/components.md#agent--ai-probe-通道)，
-AI 工作流见 [AI 集成](ai-integration.md)。
+Command batches are delivered via the guest-side virtuoso-agent (a JSON line protocol), and the
+event stream is written to `agent-events.jsonl` in the run directory. See
+[the agent section of Component Mechanics](../concepts/components.md#agent--ai-probe-channel)
+for channel details, and [AI Integration](ai-integration.md) for AI workflows.
 
-## argv 人工复核
+## Manual argv Review
 
 ```bash
-QEMU=echo virtuoso shell    # 只打印 QEMU argv，不启动
+QEMU=echo virtuoso shell    # prints only the QEMU argv, does not launch
 ```
 
 ---
 
-症状速查见[故障排查](troubleshooting.md)。
+For quick symptom lookup, see [Troubleshooting](troubleshooting.md).

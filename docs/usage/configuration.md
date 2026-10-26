@@ -1,78 +1,87 @@
-# 配置参考
+# Configuration Reference
 
-`virtuoso.toml` 是唯一配置面。仓库根的模板即缺省常规启动配置，可选能力全部
-以注释形式在场，取消注释即启用。
+`virtuoso.toml` is the single configuration surface. The template at the repo root is the
+default regular-launch configuration; every optional capability is present as a comment —
+uncomment to enable.
 
-- **优先级**：同名标量键以**进程环境变量**为准（env 覆盖 toml，CI / 命令行
-  临时改参不动文件）；持久配置只写 toml。
-- **严格解析**：未知键 / 非法类型解析期报错，不静默忽略。
-- 诊断呈现：`virtuoso doctor`（一屏）或 `virtuoso doctor --verbose`（全量清单 + 类型化配置诊断）。
+- **Priority**: for same-named scalar keys, **process environment variables** win (env
+  overrides toml — CI / one-off command-line tweaks never touch the file); persistent
+  configuration is written only to toml.
+- **Strict parsing**: unknown keys / invalid types error out at parse time; nothing is
+  silently ignored.
+- Diagnostic presentation: `virtuoso doctor` (one screen) or `virtuoso doctor --verbose`
+  (full checklist + typed configuration diagnostics).
 
-## 全局键
+## Global Keys
 
-| 键 | 环境变量 | 说明 |
+| Key | Env Var | Description |
 |---|---|---|
-| `arch` | `ARCH` | `x86_64` \| `arm64` \| `riscv64`（缺省 = 宿主架构） |
-| `timeout_secs` | `QEMU_TIMEOUT` | 墙钟超时秒数；0 一律拒绝 |
-| `smp` | `SMP` | vCPU 总数；多节点 NUMA 时必须被节点数整除（解析期报错，启动期二次校验） |
-| `auto_test` | `AUTO_TEST` | true = 跑完 `/tests/` 自动关机；false = 落入交互 shell |
-| `kernel_path` | `KERNEL_PATH` | 内核树路径（装置在树内时可自动探测；**docker 模式下被活动卷覆盖**，仅 raw 模式生效——见下节解析序） |
-| `kernel_image` | `KERNEL_IMAGE` | 内核镜像覆盖（缺省 = 内核树内 arch 对应镜像） |
-| `qemu` | `QEMU` | QEMU 二进制覆盖（`QEMU=echo` 可打印 argv 对照） |
-| `cmdline_extra` | `CMDLINE_EXTRA` | 内核 cmdline 追加段：原样整串拼在机器拼装基线之后（空缺省 = 基线不变）。内核参数 last-wins，追加即覆盖（如 `nokaslr initcall_debug loglevel=4`；`console=` 例外：注册为第二控制台，后者成为 preferred） |
-| `qemu_opts` | `QEMU_OPTS` | 透传兜底参数数组（env 为空白切分；vfio 组件设备由装配点单独追加，不混入本链） |
+| `arch` | `ARCH` | `x86_64` \| `arm64` \| `riscv64` (default = host architecture) |
+| `timeout_secs` | `QEMU_TIMEOUT` | Wall-clock timeout in seconds; 0 is always rejected |
+| `smp` | `SMP` | Total vCPU count; with multi-node NUMA it must be divisible by the node count (parse-time error, re-checked at launch) |
+| `auto_test` | `AUTO_TEST` | true = power off automatically after `/tests/` finishes; false = drop into an interactive shell |
+| `kernel_path` | `KERNEL_PATH` | Kernel tree path (auto-detected when the harness sits inside the tree; **overridden by the active volume in docker mode**, effective only in raw mode — see the resolution order in the next section) |
+| `kernel_image` | `KERNEL_IMAGE` | Kernel image override (default = the arch-appropriate image inside the kernel tree) |
+| `qemu` | `QEMU` | QEMU binary override (`QEMU=echo` prints the argv for comparison) |
+| `cmdline_extra` | `CMDLINE_EXTRA` | Extra kernel cmdline fragments: the whole string is appended verbatim after the machine-assembled baseline (empty default = baseline unchanged). Kernel parameters are last-wins, so appending overrides (e.g. `nokaslr initcall_debug loglevel=4`; `console=` is the exception: it registers a second console, and the later one becomes preferred) |
+| `qemu_opts` | `QEMU_OPTS` | Catch-all pass-through argument array (env is split on whitespace; vfio component devices are appended separately at the assembly point and are never mixed into this chain) |
 
-## docker 内核供给的环境变量（无 toml 键）
+## Environment Variables for docker Kernel Provisioning (No toml Keys)
 
-`virtuoso kernel` 命令组（[容器化内核开发环境](../../devkit/docker/README.md)）
-不占 `virtuoso.toml` 键，只走环境变量（优先级同上：env > 状态文件 > 内置缺省）：
+The `virtuoso kernel` command group ([containerized kernel development
+environment](../../devkit/docker/README.md))
+occupies no `virtuoso.toml` keys — it goes purely through environment variables (priority as
+above: env > state file > built-in default):
 
-| 环境变量 | 说明 |
+| Env Var | Description |
 |---|---|
-| `KERNEL_VOLUME` | 活动卷覆盖（压过 current 状态文件 `.virtuoso/kernel-current.json`） |
-| `KERNEL_ARCH` | 目标架构覆盖（缺省 = 顶层 `arch`） |
-| `KERNEL_REF` | `kernel clone` 缺省 ref（缺省 master） |
-| `KERNEL_TOOLCHAIN_IMAGE` | 工具链镜像覆盖（缺省 ghcr.io/yxalix/virtuoso-kernel:latest；与 `KERNEL_IMAGE` 无关） |
+| `KERNEL_VOLUME` | Active volume override (takes precedence over the current state file `.virtuoso/kernel-current.json`) |
+| `KERNEL_ARCH` | Target architecture override (default = top-level `arch`) |
+| `KERNEL_REF` | Default ref for `kernel clone` (default master) |
+| `KERNEL_TOOLCHAIN_IMAGE` | Toolchain image override (default ghcr.io/yxalix/virtuoso-kernel:latest; unrelated to `KERNEL_IMAGE`) |
 
-**内核树解析序**（build/test/doctor 消费哪棵树，唯一规则）：
+**Kernel tree resolution order** (which tree build/test/doctor consume — the single rule):
 
 ```
-env KERNEL_PATH > current 活动卷（KERNEL_VOLUME env > 状态文件）> toml kernel_path > 缺省（项目根上一级）
+env KERNEL_PATH > current active volume (KERNEL_VOLUME env > state file) > toml kernel_path > default (one level above the project root)
 ```
 
-`kernel use/clone` 写下的活动卷压过 toml——切卷即切换测试目标，无需手动改
-`kernel_path`；env 临时覆盖恒最高。`kernel_path` 键只在 raw 模式（无活动卷）
-生效。
+The active volume written by `kernel use/clone` takes precedence over toml — switching volumes
+switches the test target, with no need to hand-edit
+`kernel_path`; env overrides are always the highest. The `kernel_path` key is only effective
+in raw mode (no active volume).
 
-## `[components.*]` 组件段
+## The `[components.*]` Component Sections
 
-每个组件段的公共字段（`enabled` / `require` / `stage`）与逐组件的专属键见
-[组件机制](../concepts/components.md)。
+The common fields of every component section (`enabled` / `require` / `stage`) and the
+per-component specific keys are described in
+[Component Mechanics](../concepts/components.md).
 
-## `[tests]` 段
+## The `[tests]` Section
 
-| 键 | 说明 |
+| Key | Description |
 |---|---|
-| `require` | 测例套件的内核模块依赖（`"<module> [key=val ...]"`，恒 runtime 阶段；同名模块组件条目优先，只补差集）。给内核特性写测例时被测模块（`=m`）声明的自然归属 |
+| `require` | Kernel module dependencies of the test-case suite (`"<module> [key=val ...]"`, always the runtime stage; component entries for same-named modules take precedence, only the difference is filled). The natural home for declaring the module under test (`=m`) when writing test cases for a kernel feature |
 
-## `[busybox]` 段
+## The `[busybox]` Section
 
-| 键 | 说明 |
+| Key | Description |
 |---|---|
-| `version` | BusyBox 版本（如 `"1.36.1"`） |
-| `release_repo` | 预编译 Release 仓库（缺省扫描 git remotes 找 github.com） |
-| `dl_url` | 显式下载 URL（供给链第一优先级） |
+| `version` | BusyBox version (e.g. `"1.36.1"`) |
+| `release_repo` | Prebuilt Release repository (by default scans git remotes for github.com) |
+| `dl_url` | Explicit download URL (highest priority in the supply chain) |
 
-供给链 = GitHub Release 拉取 + 本地缓存复用，无源码编译兜底（全部未命中即报错）。
-详见[供给与构建流水线](../concepts/pipeline.md)。
+Supply chain = fetch from a GitHub Release + local cache reuse, with no source-build fallback
+(everything missing is an error).
+See [Provisioning and Build Pipeline](../concepts/pipeline.md) for details.
 
-## 架构矩阵
+## Architecture Matrix
 
-| arch | QEMU 二进制 | 内核镜像 | 控制台 | 机型 |
+| arch | QEMU Binary | Kernel Image | Console | Machine |
 |---|---|---|---|---|
-| `arm64`（缺省） | `qemu-system-aarch64` | `arch/arm64/boot/Image` | `ttyAMA0` | `virt` |
+| `arm64` (default) | `qemu-system-aarch64` | `arch/arm64/boot/Image` | `ttyAMA0` | `virt` |
 | `x86_64` | `qemu-system-x86_64` | `arch/x86/boot/bzImage` | `ttyS0` | `q35` |
 | `riscv64` | `qemu-system-riscv64` | `arch/riscv/boot/Image` | `ttyS0` | `virt` |
 
-交叉组合随意（如 arm64 宿主跑 `--arch x86_64`），目标与宿主不同构时
-doctor 会告警，启动自动回退 TCG。
+Any cross combination works (e.g. an arm64 host running `--arch x86_64`); when target and host
+architectures differ, doctor warns and launch automatically falls back to TCG.

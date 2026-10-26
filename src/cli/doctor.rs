@@ -1,8 +1,9 @@
-//! `virtuoso doctor`：环境体检唯一入口。检查引擎复用
-//! crate::builder::verify::run_checks（语义单一来源，引擎输入投影 engine_report
-//! 在本文件），两种呈现：缺省 = flutter-doctor 风格一屏（引擎检查按消息
-//! 前缀归并为组件行，✓/✗/! 一眼可读）；`--verbose` = 类型化配置诊断 +
-//! 完整检查清单。退出码：critical 未过 → 1。
+//! `virtuoso doctor`: the single entry point for the environment health check. The check
+//! engine reuses crate::builder::verify::run_checks (single source of truth for check
+//! semantics; the engine input projection engine_report lives in this file). Two
+//! renderings: default = a flutter-doctor style one-screen view (engine checks merged
+//! by message prefix into component lines, ✓/✗/! readable at a glance); `--verbose` =
+//! typed config diagnostics + the full check list. Exit code: a critical failure → 1.
 
 use std::path::Path;
 
@@ -14,12 +15,13 @@ use crate::builder::verify::{detail, CheckKind, Level, Report, RootfsDState};
 use super::resolve_arch;
 use crate::config::Config;
 
-// ---------------------------------------------------------------- 一屏分组
+// ---------------------------------------------------------------- one-screen groups
 
-/// doctor 一屏呈现（flutter-doctor 风格）：引擎检查按 CheckKind 归并为
-/// 组件组行，✓/✗/! 一眼可读。分组唯一依据是 CheckKind（引擎自带），无
-/// 消息文本反解；Pass/Info 行取引擎预计算的 summary 紧凑短语，Fail/Warn
-/// 行取 label 剥离后的全文。
+/// The doctor one-screen rendering (flutter-doctor style): engine checks are merged
+/// by CheckKind into component group lines, with ✓/✗/! readable at a glance. Grouping
+/// is based solely on CheckKind (provided by the engine), never reverse-parsed from
+/// message text; Pass/Info lines use the engine's precomputed compact summary
+/// phrases, Fail/Warn lines use the full text with the label stripped.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Group {
@@ -44,7 +46,7 @@ impl Group {
     }
 }
 
-/// 固定呈现顺序。
+/// Fixed rendering order.
 const GROUP_ORDER: &[Group] = &[
     Group::Config,
     Group::Toolchain,
@@ -54,7 +56,8 @@ const GROUP_ORDER: &[Group] = &[
     Group::Artifacts,
 ];
 
-/// 引擎检查主题 → 一屏分组（穷尽匹配：引擎新增 kind 时此处编译期报错）。
+/// Engine check subject → one-screen group (exhaustive match: a new engine kind
+/// fails compilation here).
 fn group_of(kind: CheckKind) -> Group {
     match kind {
         CheckKind::Config => Group::Config,
@@ -71,7 +74,7 @@ fn group_of(kind: CheckKind) -> Group {
     }
 }
 
-/// 组内最严重级别（Info 视同 Pass：可选工具缺失不降级）。
+/// Worst level within a group (Info counts as Pass: a missing optional tool does not downgrade).
 fn worst(a: Level, b: Level) -> Level {
     let rank = |l: Level| match l {
         Level::Fail => 3,
@@ -90,14 +93,15 @@ fn worst(a: Level, b: Level) -> Level {
 struct GroupOut {
     group: Group,
     level: Level,
-    /// (级别, 文本)：Pass/Info 为紧凑短语（合并渲染），Fail/Warn 为全文（逐行）。
+    /// (level, text): Pass/Info uses compact phrases (merged rendering); Fail/Warn
+    /// uses full text (one line each).
     lines: Vec<(Level, String)>,
 }
 
 fn slot(out: &mut [GroupOut], g: Group) -> &mut GroupOut {
     out.iter_mut()
         .find(|s| s.group == g)
-        .expect("GROUP_ORDER 覆盖全部分组")
+        .expect("GROUP_ORDER covers all groups")
 }
 
 fn group_checks(report: &Report) -> Vec<GroupOut> {
@@ -177,20 +181,23 @@ fn render(groups: &[GroupOut], tty: bool) -> String {
             rows[0]
         ));
         for row in &rows[1..] {
-            // 与首行正文列对齐：2 缩进 + 图标 1 + 空格 + 组名 11 + 2 空格
+            // Align with the first line's text column: 2 indent + icon 1 + space +
+            // group name 11 + 2 spaces
             out.push_str(&format!("{:<17}{}\n", "", row));
         }
     }
     out
 }
 
-// ---------------------------------------------------------------- 引擎输入投影
+// ---------------------------------------------------------------- engine input projection
 
-/// 检查引擎输入投影（保证检查语义单一来源——新增前置条件只动
-/// crate::builder::verify::run_checks，doctor 的两种呈现自动跟随）。
+/// Check engine input projection (keeps check semantics single-sourced — new
+/// prerequisites only touch crate::builder::verify::run_checks, and both doctor
+/// renderings follow automatically).
 fn engine_report(cfg: &Config, arch: Arch, rootfs_d: RootfsDState) -> anyhow::Result<Report> {
     let host_arch = Arch::parse(std::env::consts::ARCH);
-    // 解析失败（如活动卷不可达）不遮蔽其余检查——docker_report 会给出细节
+    // A resolution failure (e.g. an unreachable active volume) does not mask the
+    // other checks — docker_report gives the details
     let (kernel_path, kernel_path_source) = match cfg.kernel_path() {
         Ok((kp, src)) => (Some(kp), Some(src.to_string())),
         Err(_) => (None, None),
@@ -227,8 +234,9 @@ fn engine_report(cfg: &Config, arch: Arch, rootfs_d: RootfsDState) -> anyhow::Re
     }))
 }
 
-/// docker 供给模式附加检查（forge 活动卷）：状态文件存在 = 活动卷开启，
-/// 才投影 forge 检查——raw 用户无状态文件，零打扰。
+/// Extra checks for the docker provisioning mode (forge active volume): forge checks
+/// are projected only when the state file exists = an active volume is enabled —
+/// raw users have no state file and see zero noise.
 fn docker_report(cfg: &Config, report: &mut Report) {
     let Ok(Some(current)) = crate::forge::read_current(&cfg.project_root) else {
         return;
@@ -254,9 +262,10 @@ fn docker_report(cfg: &Config, report: &mut Report) {
     ));
 }
 
-/// rootfs.d 缺失即建（空目录）：drop-in 目录不随 clone 分发，doctor 是新人
-/// 必经入口，建出后由引擎检查就地解释（verify::check_rootfs_d）。创建失败
-/// 不拦体检——降级为 WARN 呈现，退出码不受影响。
+/// Create rootfs.d if missing (as an empty directory): the drop-in dir does not ship
+/// with the clone, and doctor is a newcomer's mandatory stop, so create it and let
+/// the engine check explain in place (verify::check_rootfs_d). A creation failure
+/// does not block the health check — it degrades to a WARN rendering, exit code unaffected.
 fn ensure_rootfs_d(dir: &Path) -> RootfsDState {
     if let Ok(md) = std::fs::metadata(dir) {
         return if md.is_dir() {
@@ -279,7 +288,7 @@ fn ensure_rootfs_d(dir: &Path) -> RootfsDState {
     }
 }
 
-/// rootfs.d 将并入的文件数（递归；与 builder 的整树并入同口径）。
+/// Number of files rootfs.d will merge in (recursive; same counting as builder's whole-tree merge).
 fn count_files(dir: &Path) -> usize {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return 0;
@@ -296,7 +305,7 @@ fn count_files(dir: &Path) -> usize {
     n
 }
 
-// ---------------------------------------------------------------- 入口
+// ---------------------------------------------------------------- entry point
 
 pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
@@ -305,7 +314,7 @@ pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> any
     let mut report = engine_report(&cfg, arch, rootfs_d)?;
     docker_report(&cfg, &mut report);
 
-    // --verbose：全量呈现（类型化配置诊断 + 完整检查清单），文本态专属
+    // --verbose: full rendering (typed config diagnostics + complete check list), text mode only
     if verbose && !json {
         super::diagnostics::print_diagnostics(&cfg, arch_override);
         print!("{}", report.render());
@@ -367,7 +376,7 @@ pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> any
     Ok(i32::from(fail_total > 0))
 }
 
-// ---------------------------------------------------------------- 测试
+// ---------------------------------------------------------------- tests
 
 #[cfg(test)]
 mod tests {
@@ -396,8 +405,9 @@ mod tests {
 
     #[test]
     fn group_of_covers_every_kind() {
-        // 穷尽性由 group_of 的 match 保证（新增 kind 编译期报错）；
-        // 这里钉死每个 kind 的预期分组，防止无意挪组破坏一屏布局。
+        // Exhaustiveness is guaranteed by group_of's match (a new kind fails compilation);
+        // this pins each kind's expected group so an accidental regroup cannot break the
+        // one-screen layout.
         for (kind, want) in [
             (CheckKind::Config, Group::Config),
             (CheckKind::HostTools, Group::Toolchain),
@@ -536,7 +546,7 @@ mod tests {
         ]));
         let rendered = render(&groups, false);
         let lines: Vec<&str> = rendered.lines().collect();
-        assert_eq!(lines.len(), 6, "六个组件组各一行:\n{rendered}");
+        assert_eq!(lines.len(), 6, "one line per component group:\n{rendered}");
         assert!(lines[0].contains("✓") && lines[0].contains("Config"));
         assert!(lines[2].contains("Kernel") && lines[2].contains("v6.6.0 · Image (42M)"));
         assert!(

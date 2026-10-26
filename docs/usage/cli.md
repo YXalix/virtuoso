@@ -1,35 +1,36 @@
-# CLI 参考
+# CLI Reference
 
-`virtuoso` 是唯一 CLI 入口（`cargo install --path .` 装入 PATH）。
+`virtuoso` is the single CLI entry point (`cargo install --path .` installs it into PATH).
 
-## 命令一览
+## Command Overview
 
-| 命令 | 说明 |
+| Command | Description |
 |---|---|
-| `doctor [--arch a] [--verbose] [--json]` | 环境体检：一屏 ✓/✗/! 组件行（缺失的 `rootfs.d/` 自动创建空目录，见[测试编写](writing-tests.md#向-rootfs-添加文件-rootfsd)）；`--verbose` = 类型化配置诊断 + 完整检查清单 |
-| `build [--busybox-only]` | 重建 initrd.img / rootfs.img / tools.img；`--busybox-only` 仅备当前架构静态 BusyBox（GitHub Release 拉取 + 本地缓存复用） |
-| `kernel clone/defconfig/build/path/shell` | 容器化内核供给：named volume 源码 + 钉死工具链镜像（详见 [devkit/docker/README.md](../../devkit/docker/README.md)） |
-| `kernel list` / `kernel use <volume>` | 卷管理：列卷（状态 + current 标记）/ 切 current（状态文件 `.virtuoso/kernel-current.json`） |
-| `clean` | 清理生成镜像与暂存目录 |
-| `shell [--kvm] [--tcg] [--gdb]` | 交互式 VM（BusyBox shell）；`--kvm` 仅 Linux，`--tcg` 强制纯模拟（macOS 缺省 HVF 时用），`--gdb` 挂起启动 + GDB stub `:1234`（恒 TCG） |
-| `test [--timeout N] [--arch a] [--replay-until-fail N] [--tcg] [--only a,b]` | 构建 → 启动 → 判定 → 工件落盘；返场模式首个非 passed 即停；macOS 同构缺省 HVF；`--only` 只跑名单内条目（平铺名 / `组/用例` / 尾斜杠 `组/` 整组；逗号分隔/可重复，零命中判失败） |
-| `probe --cmd/--cmd-file [--json] [--timeout N]` | AI 交互通道：virtio-serial agent 命令批，结构化事件流 |
-| `skill install \| uninstall` | AI skill 装入 / 移出内核树 |
+| `doctor [--arch a] [--verbose] [--json]` | Environment health check: one screen of ✓/✗/! component lines (a missing `rootfs.d/` gets an empty directory created automatically, see [Writing Test Cases](writing-tests.md#adding-files-to-the-rootfs-rootfsd)); `--verbose` = typed configuration diagnostics + the full checklist |
+| `build [--busybox-only]` | Rebuilds initrd.img / rootfs.img / tools.img; `--busybox-only` prepares only the statically linked BusyBox for the current architecture (fetched from a GitHub Release + local cache reuse) |
+| `kernel clone/defconfig/build/path/shell` | Containerized kernel provisioning: source in a named volume + a pinned-toolchain image (see [devkit/docker/README.md](../../devkit/docker/README.md) for details) |
+| `kernel list` / `kernel use <volume>` | Volume management: list volumes (status + current marker) / switch current (state file `.virtuoso/kernel-current.json`) |
+| `clean` | Cleans generated images and staging directories |
+| `shell [--kvm] [--tcg] [--gdb]` | Interactive VM (BusyBox shell); `--kvm` is Linux-only, `--tcg` forces pure emulation (use when macOS would default to HVF), `--gdb` suspends boot + GDB stub on `:1234` (always TCG) |
+| `test [--timeout N] [--arch a] [--replay-until-fail N] [--tcg] [--only a,b]` | build → launch → judge → artifacts persisted to disk; replay mode stops at the first non-passed verdict; on macOS the default is HVF when host and target match; `--only` runs only the listed entries (flat name / `group/case` / trailing slash `group/` for a whole group; comma-separated / repeatable, zero matches counts as failure) |
+| `probe --cmd/--cmd-file [--json] [--timeout N]` | AI interaction channel: batches of agent commands over virtio-serial, structured event stream |
+| `skill install \| uninstall` | Installs / removes AI skills from the kernel tree |
 
-## 通用行为
+## Common Behavior
 
-- `--arch` 覆盖 `virtuoso.toml` 的同名键（等价环境变量 `ARCH`，
-  见[配置参考](configuration.md)）；
-- `--json` 输出可直接进管道（jq 等）；
-- 退出码语义：0=通过、124=超时（137 归一）、130=Ctrl-C、其余=失败——
-  详见[冻结契约](../concepts/contracts.md)；
-- Ctrl-C 守护全局装载：收割 QEMU 进程组、落盘已产出工件。
+- `--arch` overrides the same-named key in `virtuoso.toml` (equivalent env var `ARCH`,
+  see [Configuration Reference](configuration.md));
+- `--json` output can be piped directly (jq etc.);
+- Exit-code semantics: 0=pass, 124=timeout (137 normalized), 130=Ctrl-C, anything else=failure —
+  see [Frozen Contracts](../concepts/contracts.md) for details;
+- A global Ctrl-C guard is always installed: it reaps the QEMU process group and persists any artifacts already produced.
 
-## AI 的标准验证循环
+## The Standard AI Verification Loop
 
 ```
 doctor → test
 ```
 
-判定以 test 收尾的 verdict 行为准（`verdict: passed` 才算通过；机读唯一面 =
-run 目录下的 `verdict.json`）。工作流详见 [AI 集成](ai-integration.md)。
+The verdict line printed at the end of `test` is the authority (`verdict: passed` is the only
+pass; the only machine-readable surface = `verdict.json` in the run directory). For the
+workflow, see [AI Integration](ai-integration.md).

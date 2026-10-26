@@ -1,7 +1,7 @@
 [package]
-# bin 名 = 包名 virtuoso（src/main.rs 自动识别）；cargo install --path . 装入 PATH。
-# 单包 crate：领域模块 builder/launcher/judge/forge 与工具模块（arch/ui/fsutil/…）
-# 同住 src/，无 workspace 成员。
+# bin name = package name virtuoso (auto-detected from src/main.rs); cargo install --path . installs it into PATH.
+# Single-package crate: the domain modules builder/launcher/judge/forge and the utility
+# modules (arch/ui/fsutil/…) all live in src/; no workspace members.
 name = "virtuoso"
 version = "0.1.0"
 edition = "2021"
@@ -11,12 +11,13 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
-# 纯 Rust 后端（miniz_oxide）：initrd 的 gzip 与平台无关，不引入 C 依赖
+# Pure Rust backend (miniz_oxide): initrd gzip is platform-independent and introduces no C dependency
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
-# 测试用例固件是独立 workspace（infra/testcases 自带 [workspace]，
-# coda std 框架 + C 体 coda-scaffold 编入），不进本包依赖图。
+# The test case firmware is an independent workspace (infra/testcases ships its own [workspace];
+# the coda std framework + the C-bodied coda-scaffold are compiled into it), and is not part
+# of this package's dependency graph.

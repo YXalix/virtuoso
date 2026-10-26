@@ -1,19 +1,24 @@
-//! judge — 判定者：串口标记协议 v1 断言引擎、verdict 判定与 verdict.json schema。
+//! judge — the judge: serial marker-protocol v1 assertion engine, verdict
+//! determination, and the verdict.json schema.
 //!
-//! 协议 v1（冻结文本）：
-//! `[PASS]/[FAIL]/[SKIP]/[INFO]` 断言行、`--- Running: X ---` / `PASSED:/FAILED: X`
-//! （init 汇编层）、`Test Results: N/M passed` 汇总、`TEST_COMPLETE` 终止标记。
+//! Protocol v1 (frozen text):
+//! `[PASS]/[FAIL]/[SKIP]/[INFO]` assert lines, `--- Running: X ---` /
+//! `PASSED:/FAILED: X` (init assembly layer), the `Test Results: N/M passed`
+//! summary, and the `TEST_COMPLETE` termination marker.
 //!
-//! 判定语义（Phase 1.5 起）：退出码仍是接口契约，但**不再单独**作为通过依据 ——
-//! `-no-reboot` 下内核 panic 会让 QEMU 以 0 退出（假通过）；`judge` 以标记协议
-//! 为准并与退出码对账，panic/oops 独立成档。
+//! Judging semantics (since Phase 1.5): the exit code remains the interface
+//! contract but is **no longer by itself** the pass criterion — under
+//! `-no-reboot` a kernel panic makes QEMU exit 0 (a false pass); `judge`
+//! goes by the marker protocol and reconciles it with the exit code, with
+//! panic/oops as their own verdict categories.
 //!
-//! 分节：判定核心（协议类型 + `judge` 对账）→ 退出码语义表（唯一语义表）
-//! → 标记协议解析器 → verdict.json schema。
+//! Sections: judging core (protocol types + the `judge` reconciliation) →
+//! exit code semantics table (the sole semantics table) → marker protocol
+//! parser → verdict.json schema.
 
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------- 判定核心
+// ---------------------------------------------------------------- Judging core
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,17 +37,19 @@ pub(crate) struct TestResult {
     pub assert_skip: u32,
 }
 
-/// events.jsonl 单行的事件信封（schema v2）。`extra` 按 kind 承载各自的
-/// 载荷（test_start/test_end: name…；assert: result；summary: passed/total；
-/// marker: value；run_end: exit_code/duration_ms/verdict；panic/oops: null）。
+/// Event envelope for one events.jsonl line (schema v2). `extra` carries the
+/// per-kind payload (test_start/test_end: name...; assert: result; summary:
+/// passed/total; marker: value; run_end: exit_code/duration_ms/verdict;
+/// panic/oops: null).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Event {
-    /// 串口日志中的行号（1 起）；run_end 合成事件无行号 → null。
+    /// Line number in the serial log (1-based); the synthetic run_end event
+    /// has no line number → null.
     pub line_no: Option<u64>,
     pub kind: EventKind,
-    /// 原始串口行。
+    /// Raw serial line.
     pub text: String,
-    /// 出现顺序，从 0 起。
+    /// Appearance order, starting from 0.
     pub seq: usize,
     pub extra: serde_json::Value,
 }
@@ -60,21 +67,22 @@ pub(crate) enum EventKind {
     RunEnd,
 }
 
-/// 一次串口流的整体解析结果。
+/// Overall parse result of one serial stream.
 #[derive(Debug, Default)]
 pub(crate) struct Audit {
     pub tests: Vec<TestResult>,
-    /// init 报告的 (passed, total)
+    /// The (passed, total) reported by init
     pub summary: Option<(u32, u32)>,
-    /// TEST_COMPLETE: 之后的内容（None = 协议未走完）
+    /// Content after TEST_COMPLETE: (None = protocol did not run to completion)
     pub marker: Option<String>,
     pub panics: Vec<String>,
     pub oops: Vec<String>,
-    /// 结构化事件流（events.jsonl 的行，按出现顺序）
+    /// Structured event stream (the lines of events.jsonl, in appearance order)
     pub events: Vec<Event>,
 }
 
-/// 运行判定 —— verdict 字符串是冻结接口（runs 工件与 CI 判定依赖）。
+/// Run verdict — the verdict strings are a frozen interface (runs artifacts
+/// and CI judging depend on them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Verdict {
@@ -122,7 +130,8 @@ impl Audit {
         self.tests.iter().filter(|t| t.assert_skip > 0).count()
     }
 
-    /// 终止标记对应的 verdict 期望；None = 协议未走完。
+    /// The verdict expectation for the termination marker; None = protocol
+    /// did not run to completion.
     pub(crate) fn marker_verdict(&self) -> Option<bool> {
         match self.marker.as_deref() {
             Some("ALL TESTS PASSED") => Some(true),
@@ -132,7 +141,7 @@ impl Audit {
     }
 }
 
-/// 判定：标记协议与退出码对账。
+/// Judge: reconcile the marker protocol with the exit code.
 pub(crate) fn judge(exit_code: i32, build_failed: bool, a: &Audit) -> Verdict {
     if build_failed {
         return Verdict::BuildFailed;
@@ -159,19 +168,23 @@ pub(crate) fn judge(exit_code: i32, build_failed: bool, a: &Audit) -> Verdict {
     }
 }
 
-// ---------------------------------------------------------------- 退出码语义表
+// ---------------------------------------------------------------- Exit code semantics
 
-// 退出码语义 —— 唯一的语义表（冻结：0=通过、124=超时、137 归一为 124、
-// 130=中断；其余非零=失败）。`judge` 的对账、host 侧收割与 verdict.json 的
-// `exit_semantics` 字段都从这里取值，不允许各自再写一份映射。
+// Exit code semantics — the sole semantics table (frozen: 0=passed,
+// 124=timeout, 137 normalized to 124, 130=interrupted; any other
+// nonzero=failed). The `judge` reconciliation, host-side reaping, and
+// verdict.json's `exit_semantics` field all take their values from here;
+// writing a separate mapping elsewhere is not allowed.
 
-/// 超时退出码（与 `timeout --signal=KILL` 的 124 语义一致）。
+/// Timeout exit code (same 124 semantics as `timeout --signal=KILL`).
 pub(crate) const EXIT_TIMEOUT: i32 = 124;
-/// Ctrl-C / 信号中断退出码（常量钉在 crate::util —— guardian 不依赖 judge）。
+/// Ctrl-C / signal interrupt exit code (the constant is pinned in
+/// crate::util — guardian does not depend on judge).
 pub(crate) use crate::util::EXIT_INTERRUPTED;
 
-/// 退出码归一：137（SIGKILL）按超时语义归一为 124；无退出码（信号死亡）
-/// 归一为 130；其余保留真实码。
+/// Exit code normalization: 137 (SIGKILL) is normalized to 124 with timeout
+/// semantics; a missing exit code (death by signal) becomes 130; everything
+/// else keeps its real code.
 pub(crate) fn normalize(code: Option<i32>) -> i32 {
     match code {
         Some(124) | Some(137) => EXIT_TIMEOUT,
@@ -180,7 +193,7 @@ pub(crate) fn normalize(code: Option<i32>) -> i32 {
     }
 }
 
-/// 退出码 → 语义标签（verdict.json 的 `exit_semantics` 字段）。
+/// Exit code → semantic label (verdict.json's `exit_semantics` field).
 pub(crate) fn semantics(code: Option<i32>) -> &'static str {
     match code {
         Some(0) => "ok",
@@ -191,12 +204,13 @@ pub(crate) fn semantics(code: Option<i32>) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------- 标记协议解析器
+// ---------------------------------------------------------------- Marker protocol parser
 
-// 标记协议 v1 解析器：串口全文 → 结构化 Audit（tests/summary/marker/
-// panics/oops + events 事件流）。
+// Marker protocol v1 parser: full serial text → structured Audit
+// (tests/summary/marker/panics/oops + the events stream).
 
-/// 解析串口全文。行号从 1 起；事件含 line_no 与出现顺序 seq。
+/// Parse the full serial text. Line numbers start at 1; events carry
+/// line_no and the appearance-order seq.
 pub(crate) fn parse(text: &str) -> Audit {
     let mut a = Audit::default();
     let mut current: Option<usize> = None;
@@ -318,12 +332,14 @@ pub(crate) fn parse(text: &str) -> Audit {
 
 // ---------------------------------------------------------------- verdict.json schema
 
-// verdict.json 的 schema 与构造（schema 单一来源）：serde 字段序即落盘
-// 键序；构造（`VerdictReport::build`）与回读（serde 反序列化）共用同一
-// 结构体，键名/取值是编译期保证。IO（落盘、目录管理）在 runs 层，这里只
-// 管语义。
+// verdict.json schema and construction (the single schema source): serde
+// field order is the persisted key order; construction
+// (`VerdictReport::build`) and reading back (serde deserialization) share
+// the same struct, so key names/values are compile-time guarantees. IO
+// (persisting, directory management) lives in the runs layer; this only
+// handles semantics.
 
-/// verdict.json 顶层 schema（schema: 2）。
+/// Top-level verdict.json schema (schema: 2).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct VerdictReport {
     pub schema: u32,
@@ -389,7 +405,7 @@ pub(crate) struct Artifacts {
     pub events: String,
 }
 
-/// 一次运行的元数据（verdict.json 的非解析部分）。
+/// Metadata of one run (the non-parse parts of verdict.json).
 pub(crate) struct RunMeta {
     pub run_id: String,
     pub arch: String,
@@ -442,7 +458,8 @@ fn file_fingerprint(p: &Path) -> Option<FileFingerprint> {
 }
 
 impl VerdictReport {
-    /// verdict.json 的唯一构造处：judge 解析 + 运行元数据 → 报告。
+    /// The sole construction site of verdict.json: judge parsing + run
+    /// metadata → report.
     pub(crate) fn build(audit: &Audit, meta: &RunMeta) -> VerdictReport {
         VerdictReport {
             schema: 2,
@@ -488,7 +505,7 @@ impl VerdictReport {
     }
 }
 
-// ---------------------------------------------------------------- 测试
+// ---------------------------------------------------------------- Tests
 
 #[cfg(test)]
 mod tests {
@@ -536,8 +553,9 @@ mod tests {
 
     #[test]
     fn grouped_names_with_slashes_pair_correctly() {
-        // 测试组：名字 token = "group/case"。名字是不透明字符串——
-        // Running/PASSED/FAILED 靠全等配对，斜杠不参与任何切分。
+        // Test groups: the name token = "group/case". Names are opaque
+        // strings — Running/PASSED/FAILED pair by exact equality; slashes
+        // play no part in any splitting.
         let log = "--- Running: smoke/t1 ---\n  [PASS] a\nPASSED: smoke/t1\n\
                    --- Running: smoke/t2 ---\nFAILED: smoke/t2\n\
                    --- Running: t3 ---\nPASSED: t3\n\
@@ -555,7 +573,7 @@ mod tests {
 
     #[test]
     fn panic_with_exit_zero_is_false_pass_detected() {
-        // -no-reboot：panic 触发 reset → QEMU exit 0，无 TEST_COMPLETE
+        // -no-reboot: panic triggers reset → QEMU exits 0, no TEST_COMPLETE
         let log = "--- Running: t1 ---\n  [PASS] step\n\
                    [    1.2] Kernel panic - not syncing: boom\n";
         let a = parse(log);
@@ -618,7 +636,7 @@ mod tests {
 
     #[test]
     fn events_roundtrip_through_jsonl() {
-        // events.jsonl 行必须能原样回读（schema 冻结的回归网）
+        // events.jsonl lines must round-trip verbatim (regression net for the frozen schema)
         let a = parse("Kernel panic - not syncing: boom\n");
         let line = serde_json::to_string(&a.events[0]).expect("serialize");
         let back: Event = serde_json::from_str(&line).expect("deserialize");
@@ -632,7 +650,7 @@ mod tests {
         assert_eq!(normalize(Some(0)), 0);
         assert_eq!(normalize(Some(1)), 1);
         assert_eq!(normalize(Some(124)), 124);
-        assert_eq!(normalize(Some(137)), 124, "SIGKILL 按超时语义归一");
+        assert_eq!(normalize(Some(137)), 124, "SIGKILL is normalized to timeout semantics");
         assert_eq!(normalize(None), 130);
     }
 

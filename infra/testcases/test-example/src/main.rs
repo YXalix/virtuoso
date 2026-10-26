@@ -1,9 +1,12 @@
-//! test-example —— 示例用例：Rust 框架入口 + C 测试体（FFI）。
+//! test-example — example test case: Rust framework entry + C test body
+//! (FFI).
 //!
-//! 新用例约定：复制本目录、改本 crate 的 `name`，`TESTS` 注册 Rust 测试、
-//! `c/` 放 C 测试体（入口函数 `run_c_tests` 里逐个调用）；断言统一走
-//! `coda` 的宏（Rust 侧）或 `coda.h` 的宏（C 侧），计数与打印同源。
-//! 产物是 musl 静态 ELF，由 builder 拷入 rootfs `/tests/` 自动发现。
+//! Convention for new test cases: copy this directory, change this crate's
+//! `name`, register Rust tests in `TESTS`, put C test bodies in `c/` (called
+//! one by one from the `run_c_tests` entry); assertions go through the
+//! `coda` macros (Rust side) or the `coda.h` macros (C side), with counting
+//! and printing from the same source. The artifact is a musl static ELF,
+//! copied by builder into the rootfs `/tests/` for auto-discovery.
 
 use coda::{run_and_exit, TestCase};
 
@@ -16,8 +19,8 @@ fn basic_functionality() -> bool {
 }
 
 fn osrelease_readable() -> bool {
-    // rootfs 阶段 init 已挂 /proc；免 fork 读内核版本（替代旧 main.c 的
-    // system("uname -r")）
+    // init already mounted /proc in the rootfs stage; read the kernel
+    // release without forking (replaces the old main.c system("uname -r"))
     match std::fs::read_to_string("/proc/sys/kernel/osrelease") {
         Ok(s) => coda::check!(!s.trim().is_empty(), "kernel release: {}", s.trim()),
         Err(e) => coda::check!(false, "read /proc/sys/kernel/osrelease: {e}"),
