@@ -80,7 +80,7 @@ pub(crate) fn ensure(
                 return Ok(bin);
             }
             let _ = std::fs::remove_file(&tmp);
-            progress.line("WARNING: gh release download failed, trying plain wget");
+            progress.line("WARN: gh release download failed, trying plain wget");
         }
         // 3) direct link
         let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
@@ -119,9 +119,8 @@ fn try_wget(url: &str, bin: &Path, asset: &str, progress: &mut Progress) -> bool
 }
 
 /// Downloads a single gh release asset to `dest` (call only when gh is on
-/// PATH with auth working; success = exit 0). Shared by the busybox and
-/// preset release supply paths.
-pub(crate) fn gh_download_asset(repo: &str, tag: &str, asset: &str, dest: &Path) -> bool {
+/// PATH with auth working; success = exit 0).
+fn gh_download_asset(repo: &str, tag: &str, asset: &str, dest: &Path) -> bool {
     Command::new("gh")
         .args(["release", "download", tag, "-R", repo, "-p", asset, "-O"])
         .arg(dest)
@@ -202,10 +201,8 @@ fn read_applet_file(p: &Path) -> anyhow::Result<Vec<String>> {
 
 /// Resolves the release repo: explicit BUSYBOX_RELEASE_REPO, else walk up
 /// from `start` to the project root containing `.git` and scan its git
-/// remotes for a GitHub one.
-/// Release repo name (owner/repo): explicit setting wins, otherwise the
-/// GitHub URL of the project git origin is parsed (shared by the busybox
-/// and kernel preset supply paths).
+/// remotes for a GitHub one (the GitHub URL of git origin parsed into
+/// owner/repo form).
 pub(crate) fn resolve_repo(start: &Path, explicit: &Option<String>) -> Option<String> {
     if let Some(repo) = explicit {
         return Some(repo.clone());

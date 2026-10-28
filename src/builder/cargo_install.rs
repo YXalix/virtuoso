@@ -37,15 +37,12 @@ impl CargoInstall<'_> {
             return Ok(0);
         }
         if !crate::util::which("cargo") {
-            progress.line(&format!(
-                "  WARNING: {} skipped (cargo not found)",
-                self.label
-            ));
+            progress.line(&format!("  WARN: {} skipped (cargo not found)", self.label));
             return Ok(0);
         }
         if !crate::builder::tools::musl_target_installed(self.triple) {
             progress.line(&format!(
-                "  WARNING: {} skipped (rust target {} not installed; \
+                "  WARN: {} skipped (rust target {} not installed; \
                  run `rustup target add {}` to enable)",
                 self.label, self.triple, self.triple
             ));

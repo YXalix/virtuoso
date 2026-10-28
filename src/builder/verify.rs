@@ -87,7 +87,7 @@ pub(crate) fn detail(kind: CheckKind, msg: &str) -> &str {
         .unwrap_or(msg)
 }
 
-fn check(
+fn mk_check(
     level: Level,
     kind: CheckKind,
     msg: impl Into<String>,
@@ -101,21 +101,20 @@ fn check(
     }
 }
 fn pass(kind: CheckKind, msg: impl Into<String>, summary: Option<String>) -> Check {
-    check(Level::Pass, kind, msg, summary)
+    mk_check(Level::Pass, kind, msg, summary)
 }
 fn fail(kind: CheckKind, msg: impl Into<String>) -> Check {
-    check(Level::Fail, kind, msg, None)
+    mk_check(Level::Fail, kind, msg, None)
 }
 fn warn(kind: CheckKind, msg: impl Into<String>) -> Check {
-    check(Level::Warn, kind, msg, None)
+    mk_check(Level::Warn, kind, msg, None)
 }
 fn info(kind: CheckKind, msg: impl Into<String>, summary: Option<String>) -> Check {
-    check(Level::Info, kind, msg, summary)
+    mk_check(Level::Info, kind, msg, summary)
 }
 
 pub(crate) struct Report {
     pub checks: Vec<Check>,
-    pub critical_pass: u32,
     pub critical_fail: u32,
     pub warnings: u32,
 }
@@ -127,12 +126,8 @@ impl Report {
         self.recount();
     }
 
-    fn recount(&mut self) {
-        self.critical_pass = self
-            .checks
-            .iter()
-            .filter(|c| c.level == Level::Pass)
-            .count() as u32;
+    /// Recomputes the counts from the check list (the only counting path).
+    pub(crate) fn recount(&mut self) {
         self.critical_fail = self
             .checks
             .iter()
@@ -161,11 +156,6 @@ impl Report {
         }
         out
     }
-}
-
-/// Affects color only, not verdicts (the doctor presentation layers share the same NO_COLOR semantics).
-pub(crate) fn is_stdout_tty() -> bool {
-    crate::util::tty()
 }
 
 // ---------------------------------------------------------------- engine input and orchestration
@@ -206,32 +196,28 @@ pub(crate) struct CheckInput<'a> {
     pub rootfs_d: RootfsDState,
 }
 
-/// Runs all checks (verify.sh's 11 items + component platform gates +
+/// Runs all checks (the shell baseline's checks + component platform gates +
 /// rootfs.d drop-in), each as an independent function.
 pub(crate) fn run_checks(input: &CheckInput) -> Report {
-    let mut checks = Vec::new();
-    check_config(input, &mut checks);
-    check_host_tools(input, &mut checks);
-    check_kernel_source(input, &mut checks);
-    check_kernel_image(input, &mut checks);
-    check_qemu(input, &mut checks);
-    check_modules(input, &mut checks);
-    check_busybox(input, &mut checks);
-    check_cross(input, &mut checks);
-    check_tools_image(input, &mut checks);
-    check_initrd(input, &mut checks);
-    check_components(input, &mut checks);
-    check_rootfs_d(input, &mut checks);
-
-    let critical_pass = checks.iter().filter(|c| c.level == Level::Pass).count() as u32;
-    let critical_fail = checks.iter().filter(|c| c.level == Level::Fail).count() as u32;
-    let warnings = checks.iter().filter(|c| c.level == Level::Warn).count() as u32;
-    Report {
-        checks,
-        critical_pass,
-        critical_fail,
-        warnings,
-    }
+    let mut report = Report {
+        checks: Vec::new(),
+        critical_fail: 0,
+        warnings: 0,
+    };
+    check_config(input, &mut report.checks);
+    check_host_tools(input, &mut report.checks);
+    check_kernel_source(input, &mut report.checks);
+    check_kernel_image(input, &mut report.checks);
+    check_qemu(input, &mut report.checks);
+    check_modules(input, &mut report.checks);
+    check_busybox(input, &mut report.checks);
+    check_cross(input, &mut report.checks);
+    check_tools_image(input, &mut report.checks);
+    check_initrd(input, &mut report.checks);
+    check_components(input, &mut report.checks);
+    check_rootfs_d(input, &mut report.checks);
+    report.recount();
+    report
 }
 
 // ---------------------------------------------------------------- per-check functions
@@ -416,23 +402,26 @@ fn check_kernel_image(input: &CheckInput, checks: &mut Vec<Check>) {
         )),
         None => {
             let hint = "build the kernel first (virtuoso kernel build in docker mode)";
+            // Name the actually resolved path (the KERNEL_IMAGE override may point
+            // somewhere other than the arch default inside the tree).
+            let name = input
+                .kernel_image
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| input.arch.kernel_img().to_string());
             checks.push(fail(
                 CheckKind::KernelImage,
-                format!(
-                    "Kernel image: {} not found ({hint})",
-                    input.arch.kernel_img()
-                ),
+                format!("Kernel image: {name} not found ({hint})"),
             ));
         }
     }
 }
 
-// 6. QEMU binary
+// 6. QEMU binary (qemu_bin carries the effective binary — override when set,
+// else the arch default — with found-ness already resolved by the projection)
 fn check_qemu(input: &CheckInput, checks: &mut Vec<Check>) {
-    let qemu_found = input.qemu_bin.is_some_and(crate::util::which);
     let qemu_override = input.qemu_override.filter(|s| !s.is_empty());
     if let Some(q) = qemu_override {
-        if qemu_found {
+        if input.qemu_bin.is_some() {
             checks.push(pass(
                 CheckKind::QemuBinary,
                 format!("QEMU binary: {q} (from env)"),
@@ -444,7 +433,7 @@ fn check_qemu(input: &CheckInput, checks: &mut Vec<Check>) {
                 format!("QEMU binary: {q} not found (from QEMU env var)"),
             ));
         }
-    } else if qemu_found {
+    } else if input.qemu_bin.is_some() {
         checks.push(pass(
             CheckKind::QemuBinary,
             format!("QEMU binary: {}", input.arch.qemu_bin()),

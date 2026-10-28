@@ -53,21 +53,24 @@ pub fn print_diagnostics(cfg: &Config, arch_override: Option<&str>) {
         }
     }
 
-    // Kernel path and image
+    // Kernel path and image (image honors the KERNEL_IMAGE/kernel_image override —
+    // same single rule as the launch path, super::kernel_image_path)
     match cfg.kernel_path() {
         Ok((kp, source)) => {
             println!("  kernel_path: {} ({source})", kp.display());
             if let Some(arch) = cfg.arch() {
-                let img = kp.join(arch.kernel_img());
-                println!(
-                    "  kernel_image: {} — {}",
-                    arch.kernel_img(),
-                    if img.is_file() {
-                        "found"
-                    } else {
-                        "MISSING (build the kernel first)"
-                    }
-                );
+                match super::kernel_image_path(cfg, arch) {
+                    Ok(img) => println!(
+                        "  kernel_image: {} — {}",
+                        img.display(),
+                        if img.is_file() {
+                            "found"
+                        } else {
+                            "MISSING (build the kernel first)"
+                        }
+                    ),
+                    Err(e) => println!("  ERROR: {e}"),
+                }
             }
         }
         Err(e) => println!("  ERROR: {e}"),

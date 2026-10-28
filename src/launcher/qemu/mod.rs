@@ -139,7 +139,6 @@ impl QemuInvocation {
         self
     }
 
-    #[cfg(test)]
     pub(crate) fn gdb_stub(mut self, on: bool) -> Self {
         self.gdb_stub = on;
         self

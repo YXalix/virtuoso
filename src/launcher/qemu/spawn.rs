@@ -71,20 +71,14 @@ impl QemuInvocation {
 }
 
 /// Terminal foreground handover before exec: forms our own process group and points the
-/// controlling terminal's foreground at it. Contains only async-signal-safe syscalls —
-/// the only legal call set between fork and exec. Must complete before exec: deferring
+/// controlling terminal's foreground at it. Contains only async-signal-safe syscalls — the
+/// only legal call set between fork and exec. Must complete before exec: deferring
 /// it to a post-spawn fixup by the parent has a race; QEMU touching the terminal first
 /// gets frozen. SIGTTOU is blocked meanwhile: at this moment our group is still
 /// "background" relative to the terminal, and the kernel response to a background group
 /// calling tcsetpgrp is SIGTTOU (default action stop); the mask is restored before exec,
 /// giving QEMU a clean starting point.
 fn hand_over_terminal_foreground() -> io::Result<()> {
-    set_terminal_foreground(0)
-}
-
-/// fd-parameterized kernel of `hand_over_terminal_foreground`: the production path always
-/// uses fd 0 (stdio inherited); the parameterization is kept for reuse in future pty scenarios.
-fn set_terminal_foreground(tty_fd: libc::c_int) -> io::Result<()> {
     // SAFETY: setpgid(0,0) forms our own process group; idempotent with std's
     // process_group(0), with no ordering dependency between the two (tcsetpgrp's target
     // group must already exist).
@@ -101,8 +95,9 @@ fn set_terminal_foreground(tty_fd: libc::c_int) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    // SAFETY: tcsetpgrp only changes the terminal's foreground process group owner.
-    let rc = unsafe { libc::tcsetpgrp(tty_fd, libc::getpgrp()) };
+    // SAFETY: tcsetpgrp only changes the terminal's foreground process group owner
+    // (fd 0 — the interactive path always inherits stdio).
+    let rc = unsafe { libc::tcsetpgrp(0, libc::getpgrp()) };
     // SAFETY: restores the entry mask; after exec QEMU starts with a clean mask.
     unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &saved, std::ptr::null_mut()) };
     if rc != 0 {

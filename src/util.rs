@@ -19,6 +19,12 @@ pub(crate) const EXIT_INTERRUPTED: i32 = 130;
 
 // ---------------------------------------------------------------- Filesystem and process environment
 
+/// Env var lookup treating an empty/whitespace-only value as unset — the uniform
+/// idiom behind every env > toml resolution chain.
+pub(crate) fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
 /// Locate an executable's full path (None when not in PATH).
 pub(crate) fn which_path(bin: &str) -> Option<PathBuf> {
     if bin.contains('/') {
@@ -423,6 +429,15 @@ impl Drop for TempRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_safe_chars_verbatim_spaces_quoted() {
+        // POSIX single-arg quoting: safe chars verbatim, the rest wrapped whole
+        // (consumed by command_line rendering and forge's container scripts)
+        assert_eq!(quote("/tmp/a b.img"), "'/tmp/a b.img'");
+        assert_eq!(quote("a'b"), "'a'\\''b'");
+        assert_eq!(quote("it's"), r"'it'\''s'");
+    }
 
     #[test]
     fn paint_degrades_without_tty() {

@@ -23,6 +23,8 @@ pub(crate) fn find_mke2fs() -> Option<PathBuf> {
 
 /// `mke2fs -q -F -t ext4 -b 4096 -O ^has_journal -L <label> -d <dir> <img> <size>M`,
 /// size = du -sm + du/2 + 2 (50% headroom fallback, no fine-grained accounting).
+/// The mke2fs binary is passed in by the caller (builder resolves it once and
+/// fails fast before any assembly work starts).
 /// `-O ^has_journal`: these appliance images are fully regenerated on every
 /// build and need no recovery semantics; the journal also has a size cliff —
 /// by default it is created once the fs crosses a threshold (about half the
@@ -32,7 +34,12 @@ pub(crate) fn find_mke2fs() -> Option<PathBuf> {
 /// `-b 4096` fixes 4K blocks: mke2fs defaults to 1K blocks for small
 /// images, where rootfs.d large-file drop-ins explode metadata overhead and
 /// runtime free space gets eaten by reserved blocks (mkdir fails with ENOSPC).
-pub(crate) fn make_ext4(dir: &Path, out: &Path, label: &str) -> anyhow::Result<()> {
+pub(crate) fn make_ext4(
+    mke2fs: &Path,
+    dir: &Path,
+    out: &Path,
+    label: &str,
+) -> anyhow::Result<()> {
     let du = std::process::Command::new("du")
         .arg("-sm")
         .arg(dir)
@@ -48,13 +55,8 @@ pub(crate) fn make_ext4(dir: &Path, out: &Path, label: &str) -> anyhow::Result<(
         .context("failed to parse du output")?;
     let size_mb = mb + mb / 2 + 2;
 
-    let mke2fs = find_mke2fs().ok_or_else(|| {
-        anyhow::anyhow!(
-            "mke2fs not found (Linux: e2fsprogs package; macOS: brew install e2fsprogs)"
-        )
-    })?;
     let _ = std::fs::remove_file(out);
-    let status = std::process::Command::new(&mke2fs)
+    let status = std::process::Command::new(mke2fs)
         .args([
             "-q", "-F", "-t", "ext4", "-b", "4096", "-O", "^has_journal", "-L", label, "-d",
         ])

@@ -61,6 +61,7 @@ pub fn run_probe(
         accel: crate::launcher::Accel::Tcg,
         auto_test: false,
         only_tests: Vec::new(),
+        gdb_stub: false,
         agent_socket: Some(sock_path.clone()),
     })?;
     println!("[LAUNCH] {}", inv.command_line()?);

@@ -71,6 +71,7 @@ fn run_vm_session(accel: Accel, gdb_stub: bool) -> anyhow::Result<i32> {
         accel,
         auto_test: false,
         only_tests: Vec::new(),
+        gdb_stub,
         agent_socket: open_agent_socket(&cfg, &cfg.target_dir, "agent-shell"),
     })?;
 
@@ -79,7 +80,7 @@ fn run_vm_session(accel: Accel, gdb_stub: bool) -> anyhow::Result<i32> {
     let (mut child, mut sup) = inv.spawn_supervised(false)?;
     let st = child.wait().context("failed to wait for QEMU exit")?;
     sup.finish();
-    Ok(super::code_of(st))
+    Ok(crate::judge::normalize(st.code()))
 }
 
 /// CI mode: build → launch (launcher) → timeout watchdog (KILL reaping, 124) →
@@ -193,6 +194,7 @@ fn test_once(
         accel,
         auto_test: cfg.auto_test(),
         only_tests: only.to_vec(),
+        gdb_stub: false,
         agent_socket: open_agent_socket(cfg, &run.path, "agent"),
     })?;
     println!("[LAUNCH] {}", inv.command_line()?);

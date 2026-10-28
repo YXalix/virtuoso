@@ -88,13 +88,3 @@ pub(crate) fn qemu_version(arch: Arch) -> Option<String> {
         .next()
         .map(str::to_string)
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn shell_quote_safe_chars_verbatim_spaces_quoted() {
-        // semantics pinned in crate::shell (this crate consumes it via re-export)
-        assert_eq!(crate::util::quote("/tmp/a b.img"), "'/tmp/a b.img'");
-        assert_eq!(crate::util::quote("a'b"), "'a'\\''b'");
-    }
-}

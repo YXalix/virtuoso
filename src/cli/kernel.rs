@@ -50,43 +50,25 @@ fn kernel_arch(cfg: &Config, cli_arch: Option<&str>) -> anyhow::Result<Arch> {
     if let Some(a) = cli_arch {
         return Arch::parse(a).ok_or_else(|| anyhow::anyhow!("unknown arch {a}"));
     }
-    if let Ok(v) = std::env::var("KERNEL_ARCH") {
-        if !v.trim().is_empty() {
-            return Arch::parse(v.trim())
-                .ok_or_else(|| anyhow::anyhow!("invalid KERNEL_ARCH: {v} (arm64|x86_64|riscv64)"));
-        }
+    if let Some(v) = crate::util::env_nonempty("KERNEL_ARCH") {
+        return Arch::parse(v.trim())
+            .ok_or_else(|| anyhow::anyhow!("invalid KERNEL_ARCH: {v} (arm64|x86_64|riscv64)"));
     }
     resolve_arch(cfg, None)
 }
 
-/// Active volume resolution: env KERNEL_VOLUME > the current state file > default volume.
+/// Active volume resolution: env KERNEL_VOLUME > the current state file > default volume
+/// (the two-level rule lives in forge::active_volume).
 fn current_volume(cfg: &Config) -> anyhow::Result<String> {
-    if let Ok(v) = std::env::var("KERNEL_VOLUME") {
-        if !v.trim().is_empty() {
-            return Ok(v);
-        }
-    }
-    if let Some(cur) = crate::forge::read_current(&cfg.project_root)? {
-        return Ok(cur.volume);
-    }
-    Ok(crate::forge::DEFAULT_VOLUME.to_string())
-}
-
-/// Toolchain image: env KERNEL_TOOLCHAIN_IMAGE > the ghcr release image (a failed
-/// pull falls back to a local build of devkit/docker/Dockerfile.kernel).
-fn toolchain_image() -> String {
-    crate::forge::resolve_image()
+    Ok(crate::forge::active_volume(&cfg.project_root)?
+        .unwrap_or_else(|| crate::forge::DEFAULT_VOLUME.to_string()))
 }
 
 /// Clone ref: CLI --ref > env KERNEL_REF > default master.
 fn clone_ref(cli_ref: Option<&str>) -> String {
     cli_ref
         .map(str::to_string)
-        .or_else(|| {
-            std::env::var("KERNEL_REF")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
+        .or_else(|| crate::util::env_nonempty("KERNEL_REF"))
         .unwrap_or_else(|| crate::forge::DEFAULT_REF.to_string())
 }
 
@@ -104,13 +86,12 @@ fn run_clone(
     full: bool,
 ) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
+    // Clone always targets a fresh volume: --as > env KERNEL_VOLUME > default —
+    // the current state file is deliberately not consulted (clone_kernel
+    // refuses an already-populated volume anyway).
     let volume = as_volume
         .map(str::to_string)
-        .or_else(|| {
-            std::env::var("KERNEL_VOLUME")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
+        .or_else(crate::forge::env_volume)
         .unwrap_or_else(|| crate::forge::DEFAULT_VOLUME.to_string());
     let arch = kernel_arch(&cfg, cli_arch)?;
     let ref_name = clone_ref(cli_ref);
@@ -122,7 +103,7 @@ fn run_clone(
             arch,
             url,
             ref_name: &ref_name,
-            image: &toolchain_image(),
+            image: &crate::forge::resolve_image(),
             dockerfile_dir: &dockerfile_dir(&cfg),
             full,
         },
@@ -154,7 +135,7 @@ fn run_defconfig(name: Option<&str>, cli_arch: Option<&str>) -> anyhow::Result<i
     );
     crate::forge::run_streaming(
         &volume,
-        &toolchain_image(),
+        &crate::forge::resolve_image(),
         &crate::forge::make_env(arch),
         &format!("make {}", crate::util::quote(target)),
     )?;
@@ -184,11 +165,11 @@ fn run_build(jobs: Option<usize>, cli_arch: Option<&str>) -> anyhow::Result<i32>
     );
     crate::forge::run_streaming(
         &volume,
-        &toolchain_image(),
+        &crate::forge::resolve_image(),
         &crate::forge::make_env(arch),
         &script,
     )?;
-    crate::forge::cdb_generate(&volume, &toolchain_image())?;
+    crate::forge::cdb_generate(&volume, &crate::forge::resolve_image())?;
     println!(
         "Kernel: built {image_target} + modules; compile_commands.json generated (raw form under /ksrc, consumed by clangd in the devcontainer)"
     );
@@ -221,7 +202,7 @@ fn run_shell(cli_arch: Option<&str>) -> anyhow::Result<i32> {
     let arch = kernel_arch(&cfg, cli_arch)?;
     crate::forge::run_tty(
         &volume,
-        &toolchain_image(),
+        &crate::forge::resolve_image(),
         &crate::forge::make_env(arch),
         &["/bin/bash"],
     )

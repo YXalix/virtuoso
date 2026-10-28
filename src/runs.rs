@@ -46,7 +46,7 @@ pub fn create_run_dir(project_root: &Path, arch: &str) -> anyhow::Result<RunDir>
     Ok(RunDir { id, path })
 }
 
-pub fn list_run_dirs(project_root: &Path) -> Vec<PathBuf> {
+fn list_run_dirs(project_root: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(runs_root(project_root))
         .into_iter()
         .flatten()

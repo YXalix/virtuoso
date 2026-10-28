@@ -204,10 +204,19 @@ fn engine_report(cfg: &Config, arch: Arch, rootfs_d: RootfsDState) -> anyhow::Re
     };
     let supply = cfg.busybox_supply();
 
-    let kernel_img = kernel_path.as_ref().map(|p| p.join(arch.kernel_img()));
+    // kernel image: KERNEL_IMAGE override > the arch image inside the tree (same
+    // rule as the launch path — super::kernel_image_path is the single home)
+    let kernel_img = super::kernel_image_path(cfg, arch).ok();
     let plan = cfg.component_plan();
     let module_lines: Vec<String> = plan.all().cloned().collect();
     let modules = crate::builder::verify::module_presence(&module_lines, kernel_path.as_deref(), &cfg.infra_dir);
+
+    // Effective QEMU binary (override > arch default), found-ness resolved once
+    // here; the engine consumes the Option and never re-scans PATH.
+    let qemu_override = cfg.qemu_override().filter(|s| !s.is_empty());
+    let qemu_eff = qemu_override
+        .clone()
+        .unwrap_or_else(|| arch.qemu_bin().to_string());
 
     Ok(crate::builder::verify::run_checks(&crate::builder::verify::CheckInput {
         config_file_exists: cfg.toml.is_some(),
@@ -217,8 +226,8 @@ fn engine_report(cfg: &Config, arch: Arch, rootfs_d: RootfsDState) -> anyhow::Re
         host: crate::HostOs::current(),
         host_is_cross: host_arch.is_some_and(|h| h != arch),
         kernel_image: kernel_img.as_deref(),
-        qemu_bin: which(arch.qemu_bin()).then_some(arch.qemu_bin()),
-        qemu_override: cfg.qemu_override().as_deref(),
+        qemu_bin: which(&qemu_eff).then_some(qemu_eff.as_str()),
+        qemu_override: qemu_override.as_deref(),
         modules: &modules,
         busybox_cached: crate::builder::busybox::cache_bin(
             &cfg.build_dir,
@@ -241,16 +250,10 @@ fn docker_report(cfg: &Config, report: &mut Report) {
     let Ok(Some(current)) = crate::forge::read_current(&cfg.project_root) else {
         return;
     };
-    let volume = std::env::var("KERNEL_VOLUME")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or(current.volume);
+    let volume = crate::forge::env_volume().unwrap_or(current.volume);
     let engine_err = crate::forge::engine_guard().err().map(|e| e.to_string());
     let host_view = crate::forge::host_view(&volume).ok();
-    let image = std::env::var(crate::forge::IMAGE_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| crate::forge::DEFAULT_IMAGE.to_string());
+    let image = crate::forge::resolve_image();
     let image_present = crate::forge::image_present(&image);
     report.extend(crate::builder::verify::kernel_docker_checks(
         &volume,
@@ -305,6 +308,15 @@ fn count_files(dir: &Path) -> usize {
     n
 }
 
+/// Suggested next command for a healthy environment (both renderings share it;
+/// embeds the effective timeout, never a hardcoded value).
+fn suggest_test_cmd(cfg: &Config) -> String {
+    match cfg.timeout_raw().trim() {
+        "0" => "virtuoso test --timeout 60".to_string(),
+        t => format!("virtuoso test --timeout {t}"),
+    }
+}
+
 // ---------------------------------------------------------------- entry point
 
 pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> anyhow::Result<i32> {
@@ -322,7 +334,7 @@ pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> any
         if report.critical_fail > 0 {
             println!("  Fix the issues above, then re-run: virtuoso doctor --verbose");
         } else {
-            println!("  Ready. Run: virtuoso test --timeout 30");
+            println!("  Ready. Run: {}", suggest_test_cmd(&cfg));
         }
         return Ok(i32::from(report.critical_fail > 0));
     }
@@ -352,7 +364,7 @@ pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> any
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        let tty = crate::builder::verify::is_stdout_tty();
+        let tty = crate::util::tty();
         let (pass_icon, fail_icon) = (
             crate::util::icon(crate::util::Icon::Pass),
             crate::util::icon(crate::util::Icon::Fail),
@@ -366,11 +378,7 @@ pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> any
                 report.warnings
             );
         } else {
-            let suggest = match cfg.timeout_raw() {
-                t if t.trim() == "0" => "virtuoso test --timeout 60".to_string(),
-                t => format!("virtuoso test --timeout {}", t.trim()),
-            };
-            println!("\n  {pass_icon} Ready — {suggest}");
+            println!("\n  {pass_icon} Ready — {}", suggest_test_cmd(&cfg));
         }
     }
     Ok(i32::from(fail_total > 0))
@@ -394,14 +402,13 @@ mod tests {
     }
 
     fn report(checks: Vec<Check>) -> Report {
-        let critical_fail = checks.iter().filter(|c| c.level == Level::Fail).count() as u32;
-        let warnings = checks.iter().filter(|c| c.level == Level::Warn).count() as u32;
-        Report {
+        let mut r = Report {
             checks,
-            critical_pass: 0,
-            critical_fail,
-            warnings,
-        }
+            critical_fail: 0,
+            warnings: 0,
+        };
+        r.recount();
+        r
     }
 
     #[test]

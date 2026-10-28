@@ -28,10 +28,6 @@ use crate::Command as CliCommand;
 
 pub(crate) use pmem::pmem_opt;
 
-pub(crate) fn code_of(status: std::process::ExitStatus) -> i32 {
-    status.code().unwrap_or(130)
-}
-
 pub fn dispatch(cmd: CliCommand) -> anyhow::Result<i32> {
     match cmd {
         CliCommand::Doctor {
@@ -101,21 +97,13 @@ pub(crate) fn tools_disk_opt(cfg: &Config) -> Option<crate::launcher::DataDisk> 
     p.is_file().then(|| crate::launcher::DataDisk::new(p))
 }
 
-/// Agent channel socket (Some only when [components.agent] enabled).
+/// Agent channel socket (Some only when [components.agent] enabled), with leftovers
+/// from the previous session cleared (QEMU does not clean up an existing socket path).
 /// The socket lands in the caller-given directory (shell: target/, test: run directory).
-pub(crate) fn agent_socket_opt(cfg: &Config, dir: &Path, name: &str) -> Option<std::path::PathBuf> {
-    cfg.agent_enabled()
-        .then(|| dir.join(format!("{name}.sock")))
-}
-
-/// Agent channel socket (decided by the component switch) + clears leftovers from
-/// the previous session (QEMU does not clean up an existing socket path).
-pub(crate) fn open_agent_socket(
-    cfg: &Config,
-    dir: &Path,
-    name: &str,
-) -> Option<std::path::PathBuf> {
-    let sock = agent_socket_opt(cfg, dir, name)?;
+pub(crate) fn open_agent_socket(cfg: &Config, dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let sock = cfg
+        .agent_enabled()
+        .then(|| dir.join(format!("{name}.sock")))?;
     let _ = std::fs::remove_file(&sock);
     Some(sock)
 }
@@ -130,6 +118,8 @@ pub(crate) struct LaunchPlan<'a> {
     pub auto_test: bool,
     /// Test case selection (`virtuoso test --only`; empty = run all). Always empty for shell/probe.
     pub only_tests: Vec<String>,
+    /// `-s -S` GDB stub on :1234 (`virtuoso shell --gdb` only; always false for test/probe).
+    pub gdb_stub: bool,
     /// Agent channel socket (None = no channel). probe always enables it (bypasses
     /// the component switch).
     pub agent_socket: Option<std::path::PathBuf>,
@@ -160,6 +150,7 @@ pub(crate) fn build_invocation(plan: &LaunchPlan) -> anyhow::Result<crate::launc
     .qemu_override(cfg.qemu_override().as_deref())
     .auto_test(plan.auto_test)
     .test_only(&plan.only_tests)
+    .gdb_stub(plan.gdb_stub)
     .cmdline_extra(cfg.cmdline_extra().as_deref().unwrap_or(""))
     .extra_opts(&extra);
     if let Some(sock) = &plan.agent_socket {

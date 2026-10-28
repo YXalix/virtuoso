@@ -423,10 +423,6 @@ impl RunMeta {
         self.run_id.split('-').next().and_then(|s| s.parse().ok())
     }
 
-    fn exit_semantics(&self) -> &'static str {
-        semantics(self.exit_code)
-    }
-
     fn repro(&self) -> String {
         format!(
             "virtuoso test --timeout {} --arch {}",
@@ -434,12 +430,9 @@ impl RunMeta {
         )
     }
 
+    /// Verdict via the sole reconciliation (`judge` handles build_failed itself).
     pub(crate) fn verdict_of(&self, audit: &Audit) -> Verdict {
-        if self.build_failed {
-            Verdict::BuildFailed
-        } else {
-            judge(self.exit_code.unwrap_or(-1), false, audit)
-        }
+        judge(self.exit_code.unwrap_or(-1), self.build_failed, audit)
     }
 }
 
@@ -470,7 +463,7 @@ impl VerdictReport {
             duration_ms: meta.duration_ms,
             timeout_s: meta.timeout_s.parse().unwrap_or(0),
             exit_code: meta.exit_code,
-            exit_semantics: meta.exit_semantics().to_string(),
+            exit_semantics: semantics(meta.exit_code).to_string(),
             verdict: meta.verdict_of(audit),
             kernel: meta.kernel.as_deref().and_then(file_fingerprint),
             qemu_version: meta.qemu_version.clone(),
