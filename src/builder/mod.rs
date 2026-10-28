@@ -51,6 +51,21 @@ else
     LOG_WARN "tools disk not mounted (/dev/vdb missing or not ext4); tools unavailable"
 fi"#;
 
+/// Inputs for the two-stage boot pair build (named fields replace the
+/// former 11-argument signature; three adjacent `&Path` fields were
+/// transposition-prone at the call site).
+pub(crate) struct BootPairInputs<'a> {
+    pub(crate) infra_dir: &'a Path,
+    pub(crate) build_dir: &'a Path,
+    pub(crate) artifacts_dir: &'a Path,
+    pub(crate) kernel_path: &'a Path,
+    pub(crate) arch: crate::Arch,
+    pub(crate) supply: &'a busybox::Supply,
+    pub(crate) modules: modconf::Modules,
+    pub(crate) rootfs_d_dir: &'a Path,
+    pub(crate) bpf_enabled: bool,
+}
+
 /// Builds the two-stage boot pair (Rust takeover of build-initrd.sh):
 /// `target/artifacts/initrd.img` (initramfs: busybox + the modules-boot.conf
 /// base set + component boot extras + init-initramfs) and
@@ -60,20 +75,21 @@ fi"#;
 /// /tools in the VM) — omitted when tools are skipped. Source assets are
 /// read from `infra_dir`; the staging dir and busybox cache live under
 /// `build_dir` (target/build).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_boot_pair(
-    infra_dir: &Path,
-    build_dir: &Path,
-    artifacts_dir: &Path,
-    kernel_path: &Path,
-    arch: crate::Arch,
-    supply: &busybox::Supply,
-    hooks: &[InitHook],
-    modules: &modconf::Modules,
-    rootfs_d_dir: &Path,
-    bpf_enabled: bool,
+    inputs: BootPairInputs<'_>,
     progress: &mut Progress,
 ) -> anyhow::Result<()> {
+    let BootPairInputs {
+        infra_dir,
+        build_dir,
+        artifacts_dir,
+        kernel_path,
+        arch,
+        supply,
+        modules,
+        rootfs_d_dir,
+        bpf_enabled,
+    } = inputs;
     // Prerequisite checks matching the scripts
     if !kernel_path.join("arch").is_dir() {
         anyhow::bail!(
@@ -190,7 +206,7 @@ pub(crate) fn build_boot_pair(
         bpftrace::install(&tools_dir, tar, progress)?;
     }
     let tools_installed = tools_installed || bpftool_installed || bpf_tar.is_some();
-    let mut hooks = hooks.to_vec();
+    let mut hooks: Vec<InitHook> = Vec::new();
     if tools_installed {
         crate::util::if_changed(
             &tools_dir,

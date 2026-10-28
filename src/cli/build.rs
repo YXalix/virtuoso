@@ -45,19 +45,20 @@ pub(crate) fn build_pair_for(
     };
     progress.line("Rebuilding initrd.img + rootfs.img (two-stage boot pair)...");
     crate::builder::build_boot_pair(
-        &cfg.infra_dir,
-        &cfg.build_dir,
-        &cfg.artifacts_dir,
-        &kernel_path,
-        arch,
-        &supply,
-        &[],
-        &crate::builder::modconf::Modules {
-            boot_extra: plan.boot_extra,
-            runtime: plan.runtime,
+        crate::builder::BootPairInputs {
+            infra_dir: &cfg.infra_dir,
+            build_dir: &cfg.build_dir,
+            artifacts_dir: &cfg.artifacts_dir,
+            kernel_path: &kernel_path,
+            arch,
+            supply: &supply,
+            modules: crate::builder::modconf::Modules {
+                boot_extra: plan.boot_extra,
+                runtime: plan.runtime,
+            },
+            rootfs_d_dir: &cfg.project_root.join("rootfs.d"),
+            bpf_enabled: cfg.bpf_enabled(),
         },
-        &cfg.project_root.join("rootfs.d"),
-        cfg.bpf_enabled(),
         &mut progress,
     )
 }
