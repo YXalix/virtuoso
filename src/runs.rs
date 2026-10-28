@@ -249,6 +249,7 @@ pub fn finalize_run(run: &RunDir, meta: &RunMeta) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
     use std::process::{Command, Stdio};
 
     /// Spawn a real child and pump its streams separately: stdout goes to
@@ -268,8 +269,7 @@ mod tests {
 
     #[test]
     fn pump_routes_streams_to_their_own_logs() {
-        let dir = std::env::temp_dir().join(format!("virtuoso-pump-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempRoot::new("virtuoso-pump");
         let (out_log, err_log) = (dir.join("serial.log"), dir.join("qemu-stderr.log"));
 
         let outcome = pump_shell(
@@ -284,13 +284,11 @@ mod tests {
         assert!(serial.contains("guest-boot") && serial.contains("guest-test"));
         let err = std::fs::read_to_string(&err_log).unwrap();
         assert_eq!(err, "qemu-noise\n");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn qemu_tail_is_bounded_and_keeps_the_last_lines() {
-        let dir = std::env::temp_dir().join(format!("virtuoso-tail-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempRoot::new("virtuoso-tail");
         let (out_log, err_log) = (dir.join("serial.log"), dir.join("qemu-stderr.log"));
 
         let outcome = pump_shell(
@@ -308,6 +306,5 @@ mod tests {
             outcome.qemu_tail.last().map(String::as_str),
             Some("noise-60")
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

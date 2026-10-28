@@ -343,12 +343,10 @@ fn merge_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
 
-    fn tmp(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("builder-rd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp(tag: &str) -> TempRoot {
+        TempRoot::new(&format!("builder-rd-{tag}"))
     }
 
     fn mkfile(path: &std::path::Path, body: &str) {
@@ -375,8 +373,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(staging.join("etc/motd")).unwrap(), "hello");
         // Same-named dir merge does not clobber existing files
         assert_eq!(std::fs::read_to_string(staging.join("etc/passwd")).unwrap(), "base");
-        let _ = std::fs::remove_dir_all(&staging);
-        let _ = std::fs::remove_dir_all(&add);
     }
 
     #[test]
@@ -389,8 +385,6 @@ mod tests {
         assert!(apply_rootfs_d(&staging, &add, &mut progress).is_err());
         // Stops on failure: the existing file was not overwritten
         assert_eq!(std::fs::read_to_string(staging.join("etc/passwd")).unwrap(), "base");
-        let _ = std::fs::remove_dir_all(&staging);
-        let _ = std::fs::remove_dir_all(&add);
     }
 
     #[test]
@@ -401,8 +395,6 @@ mod tests {
         std::fs::create_dir_all(add.join("thing")).unwrap();
         let mut progress = Progress::stdout();
         assert!(apply_rootfs_d(&staging, &add, &mut progress).is_err());
-        let _ = std::fs::remove_dir_all(&staging);
-        let _ = std::fs::remove_dir_all(&add);
     }
 
     #[test]
@@ -411,6 +403,5 @@ mod tests {
         let mut progress = Progress::stdout();
         let n = apply_rootfs_d(&staging, &staging.join("nonexistent"), &mut progress).unwrap();
         assert_eq!(n, 0);
-        let _ = std::fs::remove_dir_all(&staging);
     }
 }

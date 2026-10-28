@@ -392,16 +392,15 @@ impl LineSock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
 
     #[test]
     fn cmd_file_skips_comments_and_blank_lines() {
-        let dir = std::env::temp_dir().join(format!("probe-cmds-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempRoot::new("probe-cmds");
         let f = dir.join("cmds.txt");
         std::fs::write(&f, "# comment\n\nuname -a\n  dmesg | tail -2  \n").unwrap();
         let cmds = collect_commands(&["echo hi".to_string()], Some(&f)).unwrap();
         assert_eq!(cmds, ["echo hi", "uname -a", "dmesg | tail -2"]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -382,6 +382,7 @@ pub fn run_doctor(arch_override: Option<&str>, json: bool, verbose: bool) -> any
 mod tests {
     use super::*;
     use crate::builder::verify::Check;
+    use crate::util::TempRoot;
 
     fn check(level: Level, kind: CheckKind, msg: &str, summary: Option<&str>) -> Check {
         Check {
@@ -555,10 +556,8 @@ mod tests {
         );
     }
 
-    fn tmp(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("doctor-rd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    fn tmp(tag: &str) -> TempRoot {
+        TempRoot::absent(&format!("doctor-rd-{tag}"))
     }
 
     #[test]
@@ -581,7 +580,6 @@ mod tests {
                 created: false
             }
         ));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -589,6 +587,5 @@ mod tests {
         let d = tmp("notdir");
         std::fs::write(&d, "not a dir").unwrap();
         assert!(matches!(ensure_rootfs_d(&d), RootfsDState::NotADir));
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

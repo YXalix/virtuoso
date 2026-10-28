@@ -750,6 +750,7 @@ pub(crate) fn parse_toml(path: &Path) -> anyhow::Result<VirtuosoToml> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
 
     fn parse(text: &str) -> anyhow::Result<VirtuosoToml> {
         toml::from_str(text).map_err(|e| anyhow::anyhow!("{e}"))
@@ -1009,10 +1010,8 @@ require = ["bpf"]
     static KSRC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Scratch project_root + optional current state file (volume, arch).
-    fn ksrc_scratch(name: &str, current: Option<(&str, &str)>) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cfg-ksrc-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn ksrc_scratch(name: &str, current: Option<(&str, &str)>) -> TempRoot {
+        let dir = TempRoot::new(&format!("cfg-ksrc-{name}"));
         if let Some((vol, arch)) = current {
             let p = dir.join(".virtuoso").join("kernel-current.json");
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1023,13 +1022,11 @@ require = ["bpf"]
 
     /// Fake view resolution: volume → view_root/<volume>, the directory
     /// really exists (passes the is_dir guard).
-    fn fake_view_factory() -> (PathBuf, impl Fn(&str) -> anyhow::Result<PathBuf>) {
-        let root = std::env::temp_dir().join(format!("cfg-ksrc-view-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let root2 = root.clone();
+    fn fake_view_factory() -> (TempRoot, impl Fn(&str) -> anyhow::Result<PathBuf>) {
+        let root = TempRoot::new("cfg-ksrc-view");
+        let base = root.to_path_buf();
         let view_of = move |v: &str| -> anyhow::Result<PathBuf> {
-            let p = root2.join(v);
+            let p = base.join(v);
             std::fs::create_dir_all(&p)?;
             Ok(p)
         };
@@ -1054,8 +1051,6 @@ require = ["bpf"]
             KernelPathSource::CurrentVolume("ksrc-mainline".into()),
             "after a volume switch the kernel tree must follow the active volume, not the stale toml value"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&view_root);
     }
 
     #[test]
@@ -1068,7 +1063,6 @@ require = ["bpf"]
         assert_eq!(p, PathBuf::from("/env/tree"));
         assert_eq!(src, KernelPathSource::Env);
         clear_kernel_env();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1083,7 +1077,6 @@ require = ["bpf"]
         let (p, src) = resolve_kernel_path(&dir, None, &view_of).unwrap();
         assert_eq!(p, dir.parent().unwrap());
         assert_eq!(src, KernelPathSource::AutoDetect);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1093,8 +1086,7 @@ require = ["bpf"]
         let dir = ksrc_scratch("gone", Some(("vanished-vol", "arm64")));
         // View resolution succeeds but the directory is absent (OrbStack not
         // running) → error rather than silently consuming the stale toml tree
-        let absent_root =
-            std::env::temp_dir().join(format!("cfg-ksrc-absent-{}", std::process::id()));
+        let absent_root = TempRoot::absent("cfg-ksrc-absent");
         let absent = move |v: &str| -> anyhow::Result<PathBuf> {
             Ok(absent_root.join(v)) // directory not created
         };
@@ -1112,6 +1104,5 @@ require = ["bpf"]
         };
         assert!(resolve_kernel_path(&dir, Some("/old/tree"), &boom).is_err());
         clear_kernel_env();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

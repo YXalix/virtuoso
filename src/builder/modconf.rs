@@ -203,11 +203,11 @@ pub(crate) fn runtime_conf_text(entries: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
 
     #[test]
     fn parse_skips_comments_and_args() {
-        let dir = std::env::temp_dir().join(format!("builder-modconf-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempRoot::new("builder-modconf");
         let conf = dir.join("modules.conf");
         std::fs::write(
             &conf,
@@ -216,13 +216,11 @@ mod tests {
         .unwrap();
         let mods = parse(&conf);
         assert_eq!(mods, ["crc64", "nvme-core", "ext4"]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn boot_set_appends_extra_without_duplicating_names() {
-        let dir = std::env::temp_dir().join(format!("builder-bootset-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempRoot::new("builder-bootset");
         let conf = dir.join("modules-boot.conf");
         std::fs::write(&conf, "# base\nvirtio_blk\next4\n").unwrap();
         let (names, text) = boot_set(
@@ -234,7 +232,6 @@ mod tests {
         assert!(text.starts_with("# base\nvirtio_blk\next4\n"));
         assert!(text.contains("crc64\n"));
         assert!(text.ends_with("x  arg=1\n"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -246,7 +243,7 @@ mod tests {
 
     #[test]
     fn collect_kos_maps_stems_from_nested_tree() {
-        let dir = std::env::temp_dir().join(format!("builder-collectkos-{}", std::process::id()));
+        let dir = TempRoot::new("builder-collectkos");
         std::fs::create_dir_all(dir.join("tree/drivers/virtio")).unwrap();
         std::fs::create_dir_all(dir.join("tree/fs")).unwrap();
         std::fs::write(dir.join("tree/drivers/virtio/virtio.ko"), b"ko").unwrap();
@@ -254,13 +251,11 @@ mod tests {
         let map = collect_kos(&dir.join("tree"));
         assert_eq!(map.get("virtio").unwrap().file_name().unwrap(), "virtio.ko");
         assert_eq!(map.get("ext4").unwrap().file_name().unwrap(), "ext4.ko");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn copy_module_list_takes_tree_hit_and_infra_fallback() {
-        let dir =
-            std::env::temp_dir().join(format!("builder-copymods-{}", std::process::id()));
+        let dir = TempRoot::new("builder-copymods");
         std::fs::create_dir_all(dir.join("tree/drivers")).unwrap();
         std::fs::create_dir_all(dir.join("infra/testcases")).unwrap();
         std::fs::write(dir.join("tree/drivers/virtio.ko"), b"ko").unwrap();
@@ -279,7 +274,6 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("virtio.ko")).unwrap(), b"ko");
         assert_eq!(std::fs::read(dest.join("crc64.ko")).unwrap(), b"ko");
         assert_eq!(std::fs::read_to_string(dest.join("modules.conf")).unwrap(), "virtio\ncrc64\n");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -287,8 +281,7 @@ mod tests {
         // The same boot manifest reused across trees: crc16 is builtin in
         // this tree (modules.builtin hit, no .ko file) → copy skipped +
         // line stripped from conf; the modular virtio copies as usual.
-        let dir =
-            std::env::temp_dir().join(format!("builder-copybuiltin-{}", std::process::id()));
+        let dir = TempRoot::new("builder-copybuiltin");
         std::fs::create_dir_all(dir.join("tree/drivers")).unwrap();
         std::fs::write(dir.join("tree/drivers/virtio.ko"), b"ko").unwrap();
         std::fs::write(dir.join("tree/modules.builtin"), "kernel/lib/crc16.ko\n").unwrap();
@@ -310,13 +303,12 @@ mod tests {
             "# rootfs\nvirtio\n",
             "builtin entries must be stripped from the conf text"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn builtin_module_still_errors_when_absent_everywhere() {
         // modules.builtin miss (truly missing/typo) → the frozen error semantics are unchanged.
-        let dir = std::env::temp_dir().join(format!("builder-copymiss2-{}", std::process::id()));
+        let dir = TempRoot::new("builder-copymiss2");
         std::fs::create_dir_all(dir.join("tree")).unwrap();
         std::fs::write(dir.join("tree/modules.builtin"), "kernel/lib/crc16.ko\n").unwrap();
         let err = copy_module_list(
@@ -330,12 +322,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("ghost.ko not found"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn copy_module_list_bails_on_missing_module() {
-        let dir = std::env::temp_dir().join(format!("builder-copymiss-{}", std::process::id()));
+        let dir = TempRoot::new("builder-copymiss");
         std::fs::create_dir_all(dir.join("tree")).unwrap();
         let err = copy_module_list(
             &dir.join("dest"),
@@ -348,6 +339,5 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("ghost.ko not found"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

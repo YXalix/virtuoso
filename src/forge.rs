@@ -715,25 +715,23 @@ fn json_body(jsonc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
 
-    /// Per-test scratch dir (parallel tests share the pid in the name and would trample
-    /// each other).
-    fn scratch(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("forge-state-{name}-{}", std::process::id()))
+    /// Per-test scratch dir (the sequence number in the name keeps parallel
+    /// tests from trampling each other).
+    fn scratch(name: &str) -> TempRoot {
+        TempRoot::absent(&format!("forge-state-{name}"))
     }
 
     #[test]
     fn missing_state_file_reads_as_none() {
         let dir = scratch("missing");
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(read_current(&dir).unwrap(), None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn write_read_roundtrip() {
         let dir = scratch("roundtrip");
-        let _ = std::fs::remove_dir_all(&dir);
         let cur = Current {
             volume: "ksrc-oe66".into(),
             arch: "arm64".into(),
@@ -741,18 +739,15 @@ mod tests {
         write_current(&dir, &cur).unwrap();
         assert_eq!(read_current(&dir).unwrap(), Some(cur));
         assert!(dir.join(".virtuoso").join("kernel-current.json").is_file());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn corrupt_state_file_is_an_error_with_hint() {
         let dir = scratch("corrupt");
-        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".virtuoso")).unwrap();
         std::fs::write(state_path(&dir), "{ not json").unwrap();
         let err = format!("{}", read_current(&dir).unwrap_err());
         assert!(err.contains("kernel use"), "hint missing: {err}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -840,15 +835,12 @@ mod tests {
 
     #[test]
     fn status_probe_by_makefile_and_config() {
-        let dir = std::env::temp_dir().join(format!("forge-status-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempRoot::new("forge-status");
         assert_eq!(status(&dir), Status::Empty);
         std::fs::write(dir.join("Makefile"), "").unwrap();
         assert_eq!(status(&dir), Status::Cloned);
         std::fs::write(dir.join(".config"), "").unwrap();
         assert_eq!(status(&dir), Status::Configured);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

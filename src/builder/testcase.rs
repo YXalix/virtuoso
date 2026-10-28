@@ -119,11 +119,11 @@ fn is_executable(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
 
     #[test]
     fn rust_binary_filter_rejects_build_artifacts() {
-        let dir = std::env::temp_dir().join(format!("builder-tc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempRoot::new("builder-tc");
         let mk = |name: &str, mode: u32| {
             let p = dir.join(name);
             std::fs::write(&p, b"elf").unwrap();
@@ -143,12 +143,11 @@ mod tests {
             rust_test_binary(&script).is_none(),
             "build scripts must be filtered"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn group_map_reads_metadata_and_bin_names() {
-        let dir = std::env::temp_dir().join(format!("builder-gmap-{}", std::process::id()));
+        let dir = TempRoot::new("builder-gmap");
         std::fs::create_dir_all(dir.join("test-net")).unwrap();
         std::fs::create_dir_all(dir.join("test-plain")).unwrap();
         std::fs::create_dir_all(dir.join("target")).unwrap();
@@ -166,6 +165,5 @@ mod tests {
         assert_eq!(map.get("test-net").map(String::as_str), Some("smoke"));
         assert_eq!(map.get("net-bin").map(String::as_str), Some("smoke"));
         assert!(!map.contains_key("test-plain"), "no declaration → flat, not in the map");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

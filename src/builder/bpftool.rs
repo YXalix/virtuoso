@@ -49,14 +49,13 @@ pub(crate) fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
 
     #[test]
     fn installs_elf_and_skips_missing_or_non_elf() {
-        let tmp =
-            std::env::temp_dir().join(format!("virtuoso-bpftool-{}", std::process::id()));
+        let tmp = TempRoot::new("virtuoso-bpftool");
         let ksrc = tmp.join("ksrc");
         let bin = tmp.join("tools/bin");
-        let _ = std::fs::remove_dir_all(&tmp);
 
         // No artifact in tree → WARN and skip (false), nothing written to staging
         assert!(!install(&ksrc, &bin, &mut Progress::stdout()).unwrap());
@@ -71,7 +70,5 @@ mod tests {
             std::fs::read(bin.join("bpftool")).unwrap(),
             b"\x7fELFpayload"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

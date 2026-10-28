@@ -165,6 +165,7 @@ fn write_data<W: Write>(w: &mut W, data: &[u8]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempRoot;
     use std::os::unix::fs::PermissionsExt;
 
     fn mk_tree(dir: &Path) {
@@ -213,8 +214,7 @@ mod tests {
 
     #[test]
     fn roundtrip_newc_entries() {
-        let dir = std::env::temp_dir().join(format!("cpio-rt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TempRoot::new("cpio-rt");
         mk_tree(&dir);
         let out = dir.join("initrd.img");
         pack_dir_gzip(&dir, &out).unwrap();
@@ -250,9 +250,8 @@ mod tests {
     /// Outputs go outside the tree — writing inside would be swallowed by the next collection.
     #[test]
     fn pack_is_deterministic() {
-        let base = std::env::temp_dir().join(format!("cpio-det-{}", std::process::id()));
+        let base = TempRoot::new("cpio-det");
         let dir = base.join("tree");
-        let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&dir).unwrap();
         mk_tree(&dir);
         let a = base.join("a.img");

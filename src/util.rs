@@ -350,6 +350,74 @@ pub(crate) fn parse_memory(s: &str) -> Result<(u64, MemUnit), String> {
     Ok((n, unit))
 }
 
+// ---------------------------------------------------------------- Test scratch directories
+
+// Test-only scratch-directory lifecycle (compiled only under cfg(test)).
+// One RAII type replaces the per-file
+// temp_dir().join(..)/create/remove_dir_all dances and their explicit
+// teardown lines, which leaked the tree whenever an assert fired early.
+
+/// Scratch root for tests under the OS temp dir. Construction removes any
+/// stale tree left by an earlier run of the same test; Drop removes the tree
+/// again (best-effort). A process-wide sequence number in the name keeps
+/// same-prefix tests from trampling each other when cargo runs them in
+/// parallel threads.
+#[cfg(test)]
+pub(crate) struct TempRoot(PathBuf);
+
+#[cfg(test)]
+impl TempRoot {
+    fn reserve(prefix: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        TempRoot(dir)
+    }
+
+    /// Reserved path with the directory created — the common shape where the
+    /// test populates the tree itself.
+    pub(crate) fn new(prefix: &str) -> Self {
+        let t = Self::reserve(prefix);
+        std::fs::create_dir_all(&t.0).unwrap();
+        t
+    }
+
+    /// Reserved path guaranteed not to exist — for tests that need absence
+    /// ("missing state reads as none", "bails on non-dir") or whose fixtures
+    /// create their own tree.
+    pub(crate) fn absent(prefix: &str) -> Self {
+        Self::reserve(prefix)
+    }
+}
+
+// Mirrors std: PathBuf derefs to Path (and implements AsRef<Path>), so call
+// sites keep `dir.join(..)` / `&dir` shapes unchanged — including generic
+// `P: AsRef<Path>` APIs where deref coercion does not apply.
+#[cfg(test)]
+impl std::ops::Deref for TempRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl AsRef<Path> for TempRoot {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 // ---------------------------------------------------------------- Tests
 
 #[cfg(test)]
@@ -396,5 +464,21 @@ mod tests {
         assert_eq!(MemUnit::G.to_mib(2), 2048);
         assert!(parse_memory("1X").is_err());
         assert!(parse_memory("x1").is_err());
+    }
+
+    #[test]
+    fn temp_root_lifecycle() {
+        let created = TempRoot::new("util-temproot-new");
+        std::fs::write(created.join("marker"), b"x").unwrap();
+        assert!(created.is_dir());
+
+        let absent = TempRoot::absent("util-temproot-absent");
+        assert!(!absent.exists(), "absent must not create the path");
+
+        let (created_path, absent_path) = (created.to_path_buf(), absent.to_path_buf());
+        drop(created);
+        drop(absent);
+        assert!(!created_path.exists(), "drop must remove the whole tree");
+        assert!(!absent_path.exists());
     }
 }
