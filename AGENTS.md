@@ -26,6 +26,10 @@ run artifacts land in `target/` (git-ignored).
 
 `virtuoso` = the canonical binary (`cargo install --path .` installs it into PATH);
 after changing CLI source code, rerun the install once to stay up to date.
+The repo-root `Makefile` is a thin forwarding shell over these commands — no logic of
+its own (bare `make` lists targets; `make test` = `virtuoso test`; extra flags ride on
+`A=`, e.g. `make test A="--replay-until-fail 5"`). `make` folds failures to its own
+exit 2, so the verdict line / `verdict.json` stays the sole authority.
 
 ```bash
 virtuoso doctor             # environment health check (✓/✗ component lines; --verbose full diagnostics; --json)

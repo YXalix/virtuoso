@@ -64,8 +64,7 @@ jobs:
   # 内核 E2E（boot + 标记协议断言）需要内核树与 KVM/TCG 资源，
   # 放在自建 runner（openEuler 宿主，virtuoso.toml 指向内核树）上手动触发。
   # runner 前置：zig（C 测试体编译器，verify 硬闸门）、内核树、KVM。
-  # runner 上以 systemd 服务或 tmux 会话常驻 virtuoso 均可；
-  # 产物 target/runs/ 会由 triage 消化，失败时把 runs 目录整体上传。
+  # runner 上以 systemd 服务或 tmux 会话常驻 virtuoso 均可。
   kernel-e2e:
     name: E2E (self-hosted, manual)
     if: github.event_name == 'workflow_dispatch'
@@ -82,10 +81,6 @@ jobs:
 
       - name: Execute E2E Suite
         run: virtuoso test --timeout 600
-
-      - name: Triage
-        if: always()
-        run: virtuoso triage || true
 
       - name: Upload Run Artifacts
         if: always()
