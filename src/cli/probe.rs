@@ -405,8 +405,7 @@ mod tests {
 
     #[test]
     fn connect_refuses_before_socket_exists() {
-        let missing =
-            std::env::temp_dir().join(format!("probe-absent-{}.sock", std::process::id()));
+        let missing = TempRoot::absent("probe-absent-sock");
         let started = Instant::now();
         let r = connect(&missing, started + Duration::from_millis(1200));
         assert!(r.is_err());
