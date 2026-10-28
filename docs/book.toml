@@ -6,7 +6,7 @@
 [book]
 title = "Virtuoso — Kernel E2E Virtualization Test Harness"
 authors = ["YXalix"]
-description = "Kernel E2E virtualization test harness: build, launch, judge, govern, cluster across runs"
+description = "Kernel E2E virtualization test harness: build, launch, judge, and triage across runs"
 language = "en"
 src = "."
 

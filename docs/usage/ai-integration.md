@@ -11,9 +11,9 @@ doctor → test
 
 **The verdict line printed at the end of `test` is the authority** (the only machine-readable
 surface = `verdict.json` in the run directory): `verdict: passed` is the only pass. The exit
-code is merely an interface contract (0=pass, 124=timeout, anything else=failure) — under
-`-no-reboot`, a kernel panic makes QEMU exit with code 0, so judging by exit code alone yields
-a false pass. For the eight verdict states and their semantics, see
+code is merely an interface contract (0=pass, 124=timeout, 130=Ctrl-C, anything else=failure) —
+under `-no-reboot`, a kernel panic makes QEMU exit with code 0, so judging by exit code alone
+yields a false pass. For the eight verdict states and their semantics, see
 [Run Artifacts and Triage](artifacts.md).
 
 ## Data Interfaces

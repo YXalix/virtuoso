@@ -28,8 +28,7 @@ uncomment to enable.
 
 ## Environment Variables for docker Kernel Provisioning (No toml Keys)
 
-The `virtuoso kernel` command group ([containerized kernel development
-environment](../../devkit/docker/README.md))
+The `virtuoso kernel` command group ([Kernel Provisioning (forge)](kernel-provisioning.md))
 occupies no `virtuoso.toml` keys — it goes purely through environment variables (priority as
 above: env > state file > built-in default):
 
@@ -40,7 +39,9 @@ above: env > state file > built-in default):
 | `KERNEL_REF` | Default ref for `kernel clone` (default master) |
 | `KERNEL_TOOLCHAIN_IMAGE` | Toolchain image override (default ghcr.io/yxalix/virtuoso-kernel:latest; unrelated to `KERNEL_IMAGE`) |
 
-**Kernel tree resolution order** (which tree build/test/doctor consume — the single rule):
+### Kernel Tree Resolution Order
+
+Which tree build/test/doctor consume — the single rule:
 
 ```
 env KERNEL_PATH > current active volume (KERNEL_VOLUME env > state file) > toml kernel_path > default (one level above the project root)
@@ -50,6 +51,13 @@ The active volume written by `kernel use/clone` takes precedence over toml — s
 switches the test target, with no need to hand-edit
 `kernel_path`; env overrides are always the highest. The `kernel_path` key is only effective
 in raw mode (no active volume).
+
+## Env-Only Variables (No toml Key)
+
+| Env Var | Description |
+|---|---|
+| `NUMA_NODES` / `NUMA_MEMORY` | Override `[components.numa]` `nodes` / `memory_per_node` with the usual env > toml priority — effective whether or not the component section is enabled (legacy path predating the component; the component switch itself still gates the argv) |
+| `BUSYBOX_APPLETS_FILE` | Explicit BusyBox applet manifest (`busybox --list` output) for a custom BusyBox config; default = `infra/busybox/applets-<version>.txt` frozen in the repo |
 
 ## The `[components.*]` Component Sections
 
@@ -65,11 +73,11 @@ per-component specific keys are described in
 
 ## The `[busybox]` Section
 
-| Key | Description |
-|---|---|
-| `version` | BusyBox version (e.g. `"1.36.1"`) |
-| `release_repo` | Prebuilt Release repository (by default scans git remotes for github.com) |
-| `dl_url` | Explicit download URL (highest priority in the supply chain) |
+| Key | Env Var | Description |
+|---|---|---|
+| `version` | `BUSYBOX_VERSION` | BusyBox version (e.g. `"1.36.1"`) |
+| `release_repo` | `BUSYBOX_RELEASE_REPO` | Prebuilt Release repository (by default scans git remotes for github.com) |
+| `dl_url` | `BUSYBOX_DL_URL` | Explicit download URL (highest priority in the supply chain) |
 
 Supply chain = fetch from a GitHub Release + local cache reuse, with no source-build fallback
 (everything missing is an error).

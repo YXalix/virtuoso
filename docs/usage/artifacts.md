@@ -54,4 +54,38 @@ the per-event facts live in
 to disk, but verdict.json may be missing
 (the marker protocol did not complete; human judgment should treat it as a failure).
 
+### Sample `verdict.json` (abridged; schema: 2)
+
+```json
+{
+  "schema": 2,
+  "run_id": "1761600000000-arm64",
+  "arch": "arm64",
+  "started_at_utc": "2026-10-28 08:00:00 UTC",
+  "duration_ms": 18432,
+  "timeout_s": 60,
+  "exit_code": 0,
+  "exit_semantics": "ok",
+  "verdict": "passed",
+  "guest": { "smp": "8", "numa_nodes": "1", "memory_per_node": "1G", "accel": "hvf", "auto_test": "true" },
+  "tests": [
+    { "name": "smoke/test-example", "status": "pass", "asserts": { "pass": 3, "fail": 0, "skip": 0 } }
+  ],
+  "summary": { "pass": 1, "fail": 0, "skip": 0, "reported_pass": 1, "reported_total": 1 },
+  "marker_complete": "ALL TESTS PASSED",
+  "repro": "virtuoso test --timeout 60 --arch arm64"
+}
+```
+
+### Sample `events.jsonl` (one JSON object per line)
+
+```jsonl
+{"line_no":1,"kind":"test_start","text":"--- Running: smoke/test-example ---","seq":0,"extra":{"name":"smoke/test-example"}}
+{"line_no":2,"kind":"assert","text":"  [PASS] step one","seq":1,"extra":{"result":"pass"}}
+{"line_no":3,"kind":"test_end","text":"PASSED: smoke/test-example","seq":2,"extra":{"name":"smoke/test-example","status":"pass"}}
+{"line_no":4,"kind":"summary","text":"Test Results: 1/1 passed","seq":3,"extra":{"passed":1,"total":1}}
+{"line_no":5,"kind":"marker","text":"TEST_COMPLETE: ALL TESTS PASSED","seq":4,"extra":{"value":"ALL TESTS PASSED"}}
+{"line_no":null,"kind":"run_end","text":"","seq":5,"extra":{"exit_code":0,"duration_ms":18432,"verdict":"passed"}}
+```
+
 For quick symptom lookup, see [Troubleshooting](troubleshooting.md).

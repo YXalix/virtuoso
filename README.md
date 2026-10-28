@@ -29,9 +29,12 @@ virtuoso test --timeout 60  # build → launch → judge → write artifacts to 
 |---|---|
 | `virtuoso doctor` | One-screen environment health check (`--verbose` for full diagnostics, `--json` for machine-readable output) |
 | `virtuoso build` | Rebuild initrd.img / rootfs.img / tools.img |
-| `virtuoso shell [--kvm] [--gdb]` | Interactive VM (BusyBox shell); `--gdb` suspends boot at the GDB stub `:1234` |
+| `virtuoso kernel clone/build/path/…` | Containerized kernel provisioning (named-volume sources + pinned toolchain; see [Kernel Provisioning](https://yxalix.github.io/virtuoso/usage/kernel-provisioning.html)) |
+| `virtuoso shell [--kvm] [--tcg] [--gdb]` | Interactive VM (BusyBox shell); `--gdb` suspends boot at the GDB stub `:1234` |
 | `virtuoso test [--arch a] [--replay-until-fail N]` | build → launch → judge; `--replay-until-fail` reruns for flaky cases |
 | `virtuoso probe --cmd '…'` | AI interaction channel (virtio-serial agent command batch) |
+| `virtuoso clean` | Remove generated images and staging directories |
+| `virtuoso skill install` | Install the AI skills into the kernel tree |
 
 ## Documentation
 
