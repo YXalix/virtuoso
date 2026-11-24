@@ -209,6 +209,21 @@ pub(crate) fn semantics(code: Option<i32>) -> &'static str {
 // Marker protocol v1 parser: full serial text → structured Audit
 // (tests/summary/marker/panics/oops + the events stream).
 
+/// Assert markers: serial-line prefix → events.jsonl result string. One row
+/// per marker — adding a marker is a row, not a new branch.
+const ASSERT_MARKERS: [(&str, &str); 3] = [
+    ("[PASS] ", "pass"),
+    ("[FAIL] ", "fail"),
+    ("[SKIP] ", "skip"),
+];
+
+fn assert_marker(t: &str) -> Option<&'static str> {
+    ASSERT_MARKERS
+        .iter()
+        .find(|(prefix, _)| t.starts_with(*prefix))
+        .map(|(_, result)| *result)
+}
+
 /// Parse the full serial text. Line numbers start at 1; events carry
 /// line_no and the appearance-order seq.
 pub(crate) fn parse(text: &str) -> Audit {
@@ -265,37 +280,19 @@ pub(crate) fn parse(text: &str) -> Audit {
                 serde_json::json!({ "name": name.trim(), "status": "fail" }),
                 &mut a,
             );
-        } else if t.starts_with("[PASS] ") {
+        } else if let Some(result) = assert_marker(t) {
             if let Some(idx) = current {
                 if let Some(tr) = a.tests.get_mut(idx) {
-                    tr.assert_pass += 1;
+                    match result {
+                        "pass" => tr.assert_pass += 1,
+                        "fail" => tr.assert_fail += 1,
+                        _ => tr.assert_skip += 1,
+                    }
                 }
             }
             ev(
                 EventKind::Assert,
-                serde_json::json!({ "result": "pass" }),
-                &mut a,
-            );
-        } else if t.starts_with("[FAIL] ") {
-            if let Some(idx) = current {
-                if let Some(tr) = a.tests.get_mut(idx) {
-                    tr.assert_fail += 1;
-                }
-            }
-            ev(
-                EventKind::Assert,
-                serde_json::json!({ "result": "fail" }),
-                &mut a,
-            );
-        } else if t.starts_with("[SKIP] ") {
-            if let Some(idx) = current {
-                if let Some(tr) = a.tests.get_mut(idx) {
-                    tr.assert_skip += 1;
-                }
-            }
-            ev(
-                EventKind::Assert,
-                serde_json::json!({ "result": "skip" }),
+                serde_json::json!({ "result": result }),
                 &mut a,
             );
         } else if let Some(rest) = t.strip_prefix("Test Results: ") {
