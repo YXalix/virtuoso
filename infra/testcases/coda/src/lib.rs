@@ -41,10 +41,39 @@ extern "C" {
 
 // ---------------------------------------------------------------- serial output
 
-/// Marker protocol v1 assertion line: two-space indent + `[TAG] message`
+/// Marker protocol v1 line printer: two-space indent + `[TAG] message`
 /// (same shape as the C macro output; the judge trims leading whitespace
-/// when parsing).
+/// when parsing). Raw primitive — assertion lines go through
+/// [`emit_counted`], which also advances the counters.
 pub fn emit(tag: &str, args: std::fmt::Arguments<'_>) {
+    println!("  [{tag}] {args}");
+}
+
+/// Increment the counter that owns @tag (PASS/FAIL/SKIP; INFO is not counted).
+fn bump(tag: &str) {
+    match tag {
+        "PASS" => {
+            PASSED.fetch_add(1, Ordering::Relaxed);
+        }
+        "FAIL" => {
+            FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+        "SKIP" => {
+            SKIPPED.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+/// Assertion line that also advances the counters.
+///
+/// Every assertion-emitting macro (`pass!`/`fail!`/`skip!`, and therefore
+/// `check!`) must go through here: `emit` only prints. Rust-side assertion
+/// lines used to land on `emit`, so a Rust test could print `[FAIL]` while
+/// `FAILED` stayed 0 — the process then exited 0, init printed
+/// `PASSED: <test>`, and the run was judged green with a real failure inside.
+pub fn emit_counted(tag: &str, args: std::fmt::Arguments<'_>) {
+    bump(tag);
     println!("  [{tag}] {args}");
 }
 
@@ -52,17 +81,17 @@ pub fn emit(tag: &str, args: std::fmt::Arguments<'_>) {
 
 #[macro_export]
 macro_rules! pass {
-    ($($arg:tt)*) => { $crate::emit("PASS", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { $crate::emit_counted("PASS", format_args!($($arg)*)) };
 }
 
 #[macro_export]
 macro_rules! fail {
-    ($($arg:tt)*) => { $crate::emit("FAIL", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { $crate::emit_counted("FAIL", format_args!($($arg)*)) };
 }
 
 #[macro_export]
 macro_rules! skip {
-    ($($arg:tt)*) => { $crate::emit("SKIP", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { $crate::emit_counted("SKIP", format_args!($($arg)*)) };
 }
 
 #[macro_export]
