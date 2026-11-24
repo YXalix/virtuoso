@@ -39,7 +39,7 @@ auto_test = true
 # overridden by the active volume: resolution order = env KERNEL_PATH > the
 # current active volume written by `kernel use/clone` > this key > default.
 # This key only takes effect in raw mode (no active volume).
-kernel_path = "/root/kernel"
+# kernel_path = "/root/kernel"
 
 # Kernel image override (default = the arch-matching image inside the kernel tree)
 # kernel_image = "/path/to/Image"
@@ -98,7 +98,7 @@ enabled = true
 # doctor/verify.
 # enabled = true
 # devices = ["0000:01:00.0"]
-# require = ["vfio", "vfio_pci"]     # guest-side drivers, choose per kernel-under-test config
+# require = ["vfio", "vfio_pci_core", "vfio_pci"]  # guest-side drivers, choose per kernel-under-test config (vfio_pci_core exists since 5.15 — drop it on older kernels; see docs/usage/kernel-config.md)
 # stage = "boot"                     # change to boot only when early-boot availability is needed
 
 # [components.numa]

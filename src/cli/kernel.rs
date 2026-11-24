@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use crate::Arch;
 
+use crate::builder::{kconfig, modconf};
 use crate::util::Progress;
 
 use super::resolve_arch;
@@ -34,6 +35,7 @@ pub fn run_kernel(action: KernelAction) -> anyhow::Result<i32> {
             full,
         ),
         KernelAction::Defconfig { name, arch } => run_defconfig(name.as_deref(), arch.as_deref()),
+        KernelAction::CheckConfig { arch } => run_check_config(arch.as_deref()),
         KernelAction::Build { jobs, arch } => run_build(jobs, arch.as_deref()),
         KernelAction::Path { volume } => run_path(volume.as_deref()),
         KernelAction::Shell { arch } => run_shell(arch.as_deref()),
@@ -174,6 +176,201 @@ fn run_build(jobs: Option<usize>, cli_arch: Option<&str>) -> anyhow::Result<i32>
         "Kernel: built {image_target} + modules; compile_commands.json generated (raw form under /ksrc, consumed by clangd in the devcontainer)"
     );
     Ok(0)
+}
+
+// ---------------------------------------------------------------- check-config
+
+/// Loaded kernel-tree facts for check-config (Makefile version + parsed .config).
+struct KernelTreeInfo {
+    version: (u32, u32, u32),
+    symbols: std::collections::BTreeMap<String, kconfig::Tristate>,
+}
+
+/// Reads and validates the tree's Makefile version and .config.
+fn load_kernel_tree(tree: &std::path::Path) -> anyhow::Result<KernelTreeInfo> {
+    let makefile = tree.join("Makefile");
+    let makefile_text = std::fs::read_to_string(&makefile).map_err(|_| {
+        anyhow::anyhow!(
+            "{} is not a kernel tree (no Makefile) — run `virtuoso kernel clone <url>` first",
+            tree.display()
+        )
+    })?;
+    let version = kconfig::version_from_makefile(&makefile_text)
+        .ok_or_else(|| anyhow::anyhow!("cannot parse kernel version from {}", makefile.display()))?;
+
+    let dot_config = tree.join(".config");
+    let conf_text = std::fs::read_to_string(&dot_config).map_err(|_| {
+        anyhow::anyhow!(
+            "no .config in {} — run `virtuoso kernel defconfig` (or copy a config in) first",
+            tree.display()
+        )
+    })?;
+    Ok(KernelTreeInfo {
+        version,
+        symbols: kconfig::parse_dot_config(&conf_text),
+    })
+}
+
+/// The single mapping from a table component name (Group::Component) to its
+/// virtuoso.toml enablement state; unknown groups (hooks) stay informational.
+fn component_enabled(cfg: &Config, name: &str) -> bool {
+    match name {
+        "agent" => cfg.agent_enabled(),
+        "vfio" => cfg.vfio().is_some(),
+        "pmem" => cfg.pmem_size().is_some(),
+        "bpf" => cfg.bpf_enabled(),
+        "numa" => cfg.numa_enabled(),
+        _ => false,
+    }
+}
+
+/// " → a.ko + b.ko" suffix for a requirement row (empty for bool symbols).
+fn module_suffix(req: &kconfig::Req) -> String {
+    if req.modules.is_empty() {
+        return String::new();
+    }
+    let kos = req
+        .modules
+        .iter()
+        .map(|m| format!("{m}.ko"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!(" → {kos}")
+}
+
+/// Prints the findings grouped by Boot/Component; returns (failures, warnings).
+fn render_findings(findings: &[kconfig::Finding], cfg: &Config) -> (usize, usize) {
+    let mut failures = 0usize;
+    let mut warnings = 0usize;
+    let mut last_group = None;
+    for f in findings {
+        if last_group != Some(f.req.group) {
+            last_group = Some(f.req.group);
+            match f.req.group {
+                kconfig::Group::Boot => println!("  Boot-critical (reach root= + console):"),
+                kconfig::Group::Component(name) => {
+                    let state = if component_enabled(cfg, name) { "enabled" } else { "off" };
+                    println!("  Component [{name}] ({state}):");
+                }
+            }
+        }
+        let sym = format!("CONFIG_{}", f.req.symbol);
+        let module = module_suffix(f.req);
+        match f.status {
+            kconfig::Status::Builtin => println!("    ✓ {sym}=y{module}"),
+            kconfig::Status::Module => println!("    ✓ {sym}=m{module}"),
+            kconfig::Status::NotYet => println!("    – {sym} n/a — {}", f.req.note),
+            kconfig::Status::Missing => {
+                let group_enabled = match f.req.group {
+                    kconfig::Group::Component(name) => component_enabled(cfg, name),
+                    kconfig::Group::Boot => false,
+                };
+                let need = match f.req.need {
+                    kconfig::Need::Builtin => " (must be =y)",
+                    kconfig::Need::BuiltinOrModule => "",
+                };
+                if f.is_failure(group_enabled) {
+                    failures += 1;
+                    println!("    ✗ {sym} not set{need} — {}", f.req.note);
+                } else {
+                    warnings += 1;
+                    println!("    ! {sym} not set{need} — {}", f.req.note);
+                }
+            }
+        }
+    }
+    (failures, warnings)
+}
+
+/// Boot manifest (infra/modules-boot.conf + component stage="boot" extras) vs
+/// the tree — mirrors the builder's resolution: in-tree .ko → builtin
+/// (skipped) → error. Skipped on unbuilt trees (no modules.order yet).
+/// Returns the missing-module count.
+fn check_boot_manifest(
+    cfg: &Config,
+    tree: &std::path::Path,
+    version: (u32, u32, u32),
+) -> anyhow::Result<usize> {
+    let plan = cfg.component_plan();
+    let (names, _) = modconf::boot_set(&cfg.infra_dir.join("modules-boot.conf"), &plan.boot_extra)?;
+    let built = tree.join("modules.order").is_file() || tree.join("modules.builtin").is_file();
+    println!();
+    if !built {
+        println!("Boot manifest: tree not built yet (no modules.order) — skipping .ko availability check");
+        return Ok(0);
+    }
+    println!("Boot manifest (infra/modules-boot.conf + stage=boot requires) vs tree:");
+    let builtin = modconf::builtin_modules(tree);
+    // Exclude the virtuoso repo when it sits inside the kernel tree (default
+    // layout): target/build staging holds .ko copies from previous builds
+    // that must not satisfy the check.
+    let exclude = (cfg.project_root != tree && cfg.project_root.starts_with(tree))
+        .then_some(cfg.project_root.as_path());
+    let kos = modconf::collect_kos_excluding(tree, exclude);
+    let mut failures = 0usize;
+    for name in &names {
+        if builtin.contains(name) {
+            println!("    ✓ {name}: builtin (skipped at build)");
+            continue;
+        }
+        if let Some(ko) = kos.get(name) {
+            let rel = ko.strip_prefix(tree).unwrap_or(ko);
+            println!("    ✓ {name}.ko: {}", rel.display());
+            continue;
+        }
+        failures += 1;
+        let hint = match kconfig::req_for_module(name) {
+            Some(req) => match req.since {
+                Some(s) if kconfig::predates(version, s) => format!(
+                    "CONFIG_{} does not exist before {}.{} — remove the entry from infra/modules-boot.conf for this kernel",
+                    req.symbol, s.0, s.1
+                ),
+                _ => format!(
+                    "CONFIG_{} is not =m in this tree — enable it (or run `virtuoso kernel build`), or drop the entry",
+                    req.symbol
+                ),
+            },
+            None => "not found in the tree — enable its CONFIG_*=m or drop the entry".to_string(),
+        };
+        println!("    ✗ {name}.ko missing — {hint}");
+    }
+    Ok(failures)
+}
+
+/// `kernel check-config`: evaluates the active kernel tree's .config against
+/// the Kconfig requirement table (builder::kconfig) and cross-checks the boot
+/// module manifest against the tree — the user-queryable surface for "which
+/// switches does Virtuoso need, and are they on in my kernel".
+fn run_check_config(cli_arch: Option<&str>) -> anyhow::Result<i32> {
+    let cfg = Config::load()?;
+    let arch = kernel_arch(&cfg, cli_arch)?;
+    let (tree, source) = cfg.kernel_path()?;
+    let info = load_kernel_tree(&tree)?;
+
+    println!("Kernel tree: {} ({source})", tree.display());
+    println!(
+        "Kernel version: {}.{}.{}   arch: {}",
+        info.version.0,
+        info.version.1,
+        info.version.2,
+        arch.name()
+    );
+    println!();
+    println!("Kconfig requirements (reference: docs/usage/kernel-config.md):");
+
+    let findings = kconfig::evaluate(&info.symbols, info.version, arch);
+    let (failures, warnings) = render_findings(&findings, &cfg);
+    let manifest_failures = check_boot_manifest(&cfg, &tree, info.version)?;
+
+    println!();
+    let gaps = failures + manifest_failures;
+    if gaps == 0 {
+        println!("check-config: OK ({warnings} warning(s)) — kernel {}.{}.{} satisfies Virtuoso requirements for {}", info.version.0, info.version.1, info.version.2, arch.name());
+        Ok(0)
+    } else {
+        println!("check-config: {gaps} gap(s), {warnings} warning(s) — see docs/usage/kernel-config.md");
+        Ok(1)
+    }
 }
 
 fn run_path(volume_flag: Option<&str>) -> anyhow::Result<i32> {

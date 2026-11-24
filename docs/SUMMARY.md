@@ -10,6 +10,7 @@
 
 - [CLI Reference](usage/cli.md)
 - [Configuration Reference](usage/configuration.md)
+- [Kernel Configuration Requirements](usage/kernel-config.md)
 - [Kernel Provisioning (forge)](usage/kernel-provisioning.md)
 - [Writing Test Cases](usage/writing-tests.md)
 - [Debugging](usage/debugging.md)

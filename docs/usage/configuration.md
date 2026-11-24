@@ -63,7 +63,11 @@ in raw mode (no active volume).
 
 The common fields of every component section (`enabled` / `require` / `stage`) and the
 per-component specific keys are described in
-[Component Mechanics](../concepts/components.md).
+[Component Mechanics](../concepts/components.md). Which `CONFIG_*` each
+component's `require` modules come from — and how they drift across kernel
+versions — is covered in
+[Kernel Configuration Requirements](kernel-config.md); verify a tree with
+`virtuoso kernel check-config`.
 
 ## The `[tests]` Section
 

@@ -58,6 +58,9 @@ virtuoso kernel clone https://gitcode.com/openeuler/kernel.git --ref OLK-6.6
 virtuoso kernel defconfig openeuler_defconfig
 virtuoso kernel build              # Image/bzImage + modules + compile_commands.json (/ksrc form)
 
+# 2b) Verify the tree's .config against Virtuoso's requirements (version-aware)
+virtuoso kernel check-config
+
 # 3) The kernel tree is host-visible: the directory `virtuoso kernel path` prints is it
 virtuoso kernel path
 ```

@@ -10,6 +10,7 @@ pub(crate) mod cargo_install;
 pub(crate) mod cpio;
 pub(crate) mod cross;
 pub(crate) mod image;
+pub(crate) mod kconfig;
 pub(crate) mod modconf;
 pub(crate) mod testcase;
 pub(crate) mod tools;

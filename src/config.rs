@@ -370,6 +370,14 @@ impl Config {
             .unwrap_or(false)
     }
 
+    /// Whether the numa component is enabled (section default = false =
+    /// single node, no -numa args).
+    pub fn numa_enabled(&self) -> bool {
+        self.comp(|c| c.numa.as_ref())
+            .and_then(|c| c.enabled)
+            .unwrap_or(false)
+    }
+
     /// Whether the bpf observability component is enabled (bpftrace is
     /// provisioned on the tools disk). Section default = false: a pure
     /// build-side switch, QEMU argv stays unrelated to the frozen baseline.

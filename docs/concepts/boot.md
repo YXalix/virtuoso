@@ -91,6 +91,11 @@ dedupes by first token keeping the first occurrence, in the fixed component
 order, and entry order is the insmod order (dependencies first). A missing
 `.ko` fails the build.
 
+The symbol-level view of this manifest (which `CONFIG_*` each module comes
+from, and how the set drifts across kernel versions 4.19 → mainline) lives in
+[Kernel Configuration Requirements](../usage/kernel-config.md); query the
+active tree with `virtuoso kernel check-config`.
+
 For the component mechanism overview, see [Components](components.md).
 
 ## 4. Known Kernel Quirks and Required Workarounds (Do Not Remove!)

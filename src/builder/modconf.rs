@@ -49,14 +49,24 @@ pub(crate) fn parse(conf: &Path) -> Vec<String> {
 /// presence checks share this single walk — per-module find would amplify
 /// into N full-tree scans on slow volumes (e.g. an OrbStack NFS view).
 pub(crate) fn collect_kos(kernel_path: &Path) -> BTreeMap<String, PathBuf> {
+    collect_kos_excluding(kernel_path, None)
+}
+
+/// `collect_kos` with an optional pruned subtree. check-config passes the
+/// virtuoso repo root when it sits inside the kernel tree: staging leftovers
+/// under `target/build/` are copies, not kernel-tree products, and must not
+/// satisfy (or shadow) the availability check.
+pub(crate) fn collect_kos_excluding(
+    kernel_path: &Path,
+    exclude: Option<&Path>,
+) -> BTreeMap<String, PathBuf> {
     let mut map = BTreeMap::new();
-    let Ok(out) = std::process::Command::new("find")
-        .arg(kernel_path)
-        .arg("-name")
-        .arg("*.ko")
-        .arg("-print")
-        .output()
-    else {
+    let mut cmd = std::process::Command::new("find");
+    cmd.arg(kernel_path);
+    if let Some(ex) = exclude {
+        cmd.arg("-path").arg(ex).arg("-prune").arg("-o");
+    }
+    let Ok(out) = cmd.arg("-name").arg("*.ko").arg("-print").output() else {
         return map;
     };
     for line in String::from_utf8_lossy(&out.stdout).lines() {

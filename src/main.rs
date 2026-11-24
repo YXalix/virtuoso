@@ -158,6 +158,14 @@ enum KernelAction {
         #[arg(long)]
         arch: Option<String>,
     },
+    /// Check the active kernel tree's .config against Virtuoso's Kconfig
+    /// requirements (boot chain + components; version-aware, 4.19..mainline).
+    /// Exit 0 = no gaps; 1 = a boot-critical or enabled-component symbol is off
+    CheckConfig {
+        /// Override the target arch (default: current-recorded / top-level arch)
+        #[arg(long)]
+        arch: Option<String>,
+    },
     /// make Image/bzImage + modules; generate CDB (raw form under /ksrc, consumed by clangd in the devcontainer)
     Build {
         /// Parallel jobs (default: host cores)

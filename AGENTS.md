@@ -38,6 +38,8 @@ virtuoso kernel clone <url> [--ref r] [--as vol] [--arch a] [--full]
                             # forge: kernel source into a named volume (+ .clangd rendering + writes current; --full full history)
 virtuoso kernel build       # forge: in-container make Image/modules + static bpftool + CDB (/ksrc in raw form)
                             #   (also defconfig/path/shell/list/use; source editing goes through devkit/docker devcontainer)
+virtuoso kernel check-config  # check the active tree's .config against Virtuoso's Kconfig requirements
+                            #   (boot chain + components, version-aware 4.19..mainline) + boot-manifest vs tree
 virtuoso test --timeout 60  # test: launcher boots → judge judges → artifacts land on disk
 virtuoso test --replay-until-fail 5   # flaky rerun: stop at the first non-passed result
 virtuoso shell [--kvm|--tcg] [--gdb]

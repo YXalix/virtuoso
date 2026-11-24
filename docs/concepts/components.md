@@ -148,7 +148,7 @@ Passes host physical PCI devices through to the guest: each BDF emits one
 [components.vfio]
 enabled = true
 devices = ["0000:01:00.0"]        # BDFs of the host devices (look them up with lspci)
-require = ["vfio", "vfio_pci"]    # declare when the guest kernel has them as =m
+require = ["vfio", "vfio_pci_core", "vfio_pci"]   # guest kernel =m; vfio_pci_core exists since 5.15 (drop it on older kernels)
 stage = "boot"                    # needed before root is mounted → boot (default runtime)
 ```
 
@@ -160,7 +160,9 @@ Prerequisites:
   manual unbind then rebind).
 - `vfio` / `vfio_pci` available in the guest kernel: with `=y` no declaration
   is needed; with `=m` list them in `require` (if the passthrough device must
-  be ready before root is mounted, add `stage = "boot"`).
+  be ready before root is mounted, add `stage = "boot"`). On kernels ≥ 5.15
+  also list `vfio_pci_core` before `vfio_pci` (the 5.15 split — see
+  [Kernel Configuration Requirements](../usage/kernel-config.md)).
 
 Limitations:
 

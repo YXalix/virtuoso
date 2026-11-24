@@ -21,6 +21,7 @@
 |---|---|
 | `kernel clone <url> [--ref r] [--as vol] [--arch a] [--full]` | Clone kernel sources into a named volume (creates the volume, renders `.clangd` per arch, sets it current); default ref master, default volume `virtuoso-kernel`; `--full` keeps complete git history (default `--depth 1`, tree only) |
 | `kernel defconfig [name] [--arch a]` | Run `make <name>` in the container (`.config` lands in the volume; default target `defconfig`) |
+| `kernel check-config [--arch a]` | Check the active kernel tree's `.config` against Virtuoso's Kconfig requirements (boot chain + components, version-aware 4.19..mainline) + boot-manifest vs tree cross-check; exit 1 on gaps — see [Kernel Configuration Requirements](kernel-config.md) |
 | `kernel build [-j N] [--arch a]` | `make Image/bzImage + modules` in the container + static bpftool + compile_commands.json (`/ksrc` raw form); `-j` defaults to host cores |
 | `kernel path [--volume v]` | Print the host-visible path of a volume (default: the current one) — the value QEMU's `kernel_path` consumption resolves to |
 | `kernel shell [--arch a]` | Interactive bash inside the container (the toolchain environment of the current volume) |
